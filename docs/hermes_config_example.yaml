@@ -1,0 +1,22 @@
+# Minimal Hermes config excerpt enabling Siqueira Memo as the external
+# MemoryProvider (plan §5 / §32.1). Placeholder values only — substitute real
+# ones at deploy time. NEVER commit real tokens.
+
+memory:
+  provider: siqueira-memo
+  config:
+    database_url: postgresql+asyncpg://siqueira:siqueira@127.0.0.1:5432/siqueira_memo
+    embedding_provider: openai
+    embedding_model: text-embedding-3-large
+    queue_backend: redis
+    # Token is read by the Siqueira HTTP service for /v1/* routes — Hermes does
+    # not need it for in-process tool calls but keep it aligned with the
+    # service's SIQUEIRA_API_TOKEN.
+    api_token: "${SIQUEIRA_API_TOKEN}"
+
+auxiliary:
+  # Hermes auxiliary compactor — Siqueira mirrors these summaries into the
+  # event log (event_type = hermes_auxiliary_compaction_observed). They are
+  # secondary-trust; Siqueira's own session summariser supersedes them.
+  compression:
+    model: claude-haiku-4-5

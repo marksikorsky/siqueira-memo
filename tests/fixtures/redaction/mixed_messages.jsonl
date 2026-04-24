@@ -1,0 +1,6 @@
+{"text": "Mark asked me to remember API key sk-proj-ccccccccccccccccccccccccccccccccccccccccccccccc for the dev env."}
+{"text": "Regular message about Hermes MemoryProvider plugin, no secrets here."}
+{"text": "Please do not paste Bearer abcd1234EFGH5678ijkl9012mnop3456qrst7890 into chat."}
+{"text": "Project URL: https://github.com/siqueira/memo (public, keep)."}
+{"text": "DB password rotated: DATABASE_URL=postgres://admin:N3wPass!@db.internal:5432/prod"}
+{"text": "Server IP is 192.168.10.5 (internal only, not a secret)."}

@@ -1,0 +1,90 @@
+name: siqueira-memo
+
+x-siqueira-env: &siqueira-env
+  SIQUEIRA_ENV: ${SIQUEIRA_ENV:-development}
+  SIQUEIRA_HOST: 0.0.0.0
+  SIQUEIRA_PORT: 8787
+  SIQUEIRA_API_TOKEN: ${SIQUEIRA_API_TOKEN:-local-dev-token}
+  SIQUEIRA_DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-siqueira}:${POSTGRES_PASSWORD:-siqueira}@postgres:5432/${POSTGRES_DB:-siqueira_memo}
+  SIQUEIRA_DATABASE_ECHO: ${SIQUEIRA_DATABASE_ECHO:-false}
+  SIQUEIRA_REDIS_URL: redis://redis:6379/0
+  SIQUEIRA_QUEUE_BACKEND: redis
+  SIQUEIRA_EMBEDDING_PROVIDER: ${SIQUEIRA_EMBEDDING_PROVIDER:-mock}
+  SIQUEIRA_EMBEDDING_MODEL: ${SIQUEIRA_EMBEDDING_MODEL:-text-embedding-3-large}
+  SIQUEIRA_EMBEDDING_DIMS: ${SIQUEIRA_EMBEDDING_DIMS:-3072}
+  SIQUEIRA_RERANKER_PROVIDER: ${SIQUEIRA_RERANKER_PROVIDER:-mock}
+  SIQUEIRA_LOG_LEVEL: ${SIQUEIRA_LOG_LEVEL:-INFO}
+  SIQUEIRA_OTEL_ENABLED: ${SIQUEIRA_OTEL_ENABLED:-false}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-siqueira}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-siqueira}
+      POSTGRES_DB: ${POSTGRES_DB:-siqueira_memo}
+    ports:
+      - "127.0.0.1:${SIQUEIRA_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - siqueira_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-siqueira} -d ${POSTGRES_DB:-siqueira_memo}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${SIQUEIRA_REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    build: .
+    profiles: ["ops"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *siqueira-env
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *siqueira-env
+    ports:
+      - "127.0.0.1:${SIQUEIRA_PUBLIC_PORT:-8787}:8787"
+    command: ["uvicorn", "siqueira_memo.main:app", "--host", "0.0.0.0", "--port", "8787"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8787/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  worker:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment: *siqueira-env
+    command: ["python", "-m", "siqueira_memo.workers.worker"]
+
+volumes:
+  siqueira_pg: {}

@@ -1,0 +1,47 @@
+name: siqueira-memo
+version: 0.1.0
+type: memory_provider
+description: |
+  Hermes-native long-term memory with provenance, redaction, and hybrid
+  retrieval. Provides the `siqueira_memory_*` toolset plus prefetch, sync_turn,
+  compression, and delegation hooks.
+entrypoint: plugins.memory.siqueira_memo:register
+tool_names:
+  - siqueira_memory_recall
+  - siqueira_memory_remember
+  - siqueira_memory_correct
+  - siqueira_memory_forget
+  - siqueira_memory_timeline
+  - siqueira_memory_sources
+config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    database_url:
+      type: string
+      description: PostgreSQL+asyncpg or sqlite+aiosqlite URL.
+    embedding_provider:
+      type: string
+      enum: [mock, openai, local]
+      default: openai
+    embedding_model:
+      type: string
+      default: text-embedding-3-large
+    queue_backend:
+      type: string
+      enum: [memory, redis]
+      default: redis
+    api_token:
+      type: string
+      description: Optional service API token for local HTTP access.
+hooks:
+  - system_prompt_block
+  - prefetch
+  - queue_prefetch
+  - sync_turn
+  - on_pre_compress
+  - on_session_end
+  - on_memory_write
+  - on_delegation
+  - on_turn_start
+  - shutdown
