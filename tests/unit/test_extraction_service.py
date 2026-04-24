@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from siqueira_memo.models import Fact, MemoryEvent
+from siqueira_memo.models import Decision, Fact, MemoryEvent
 from siqueira_memo.models.constants import STATUS_ACTIVE, STATUS_SUPERSEDED
 from siqueira_memo.schemas.memory import CorrectRequest, RememberRequest
 from siqueira_memo.services.extraction_service import ExtractionService
@@ -29,6 +29,8 @@ async def test_remember_fact_is_idempotent(db, session):
     facts = (await session.execute(select(Fact))).scalars().all()
     active = [f for f in facts if f.status == STATUS_ACTIVE]
     assert len(active) == 1
+    assert first.event_id in active[0].source_event_ids
+    assert second.event_id in active[0].source_event_ids
 
 
 @pytest.mark.asyncio
@@ -46,6 +48,10 @@ async def test_remember_decision_creates_event(db, session):
     ).scalar_one()
     assert ev.event_type == "decision_recorded"
     assert ev.payload["decision_id"] == str(result.id)
+    decision = (
+        await session.execute(select(Decision).where(Decision.id == result.id))
+    ).scalar_one()
+    assert result.event_id in decision.source_event_ids
 
 
 @pytest.mark.asyncio

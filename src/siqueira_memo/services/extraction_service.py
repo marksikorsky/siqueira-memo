@@ -101,42 +101,46 @@ class ExtractionService:
             existing_active.confidence = max(existing_active.confidence, request.confidence)
             existing_active.updated_at = datetime.now(UTC)
             fact_id = existing_active.id
+            fact_row = existing_active
             status = STATUS_ACTIVE
         else:
             fact_id = uuid.uuid4()
-            session.add(
-                Fact(
-                    id=fact_id,
-                    profile_id=profile_id,
-                    subject=subject,
-                    predicate=predicate,
-                    object=obj,
-                    statement=statement,
-                    canonical_key=key,
-                    project=request.project,
-                    topic=request.topic,
-                    confidence=request.confidence,
-                    status=STATUS_ACTIVE,
-                    valid_from=request.valid_from,
-                    valid_to=request.valid_to,
-                    source_event_ids=list(request.source_event_ids),
-                    source_message_ids=list(request.source_message_ids),
-                    extractor_name="manual",
-                    extractor_version="1",
-                    prompt_version=self.fact_prompt_version,
-                    model_provider=self.model_provider,
-                    model_name=self.model_name,
-                    source_scope="message",
-                    schema_version=self.schema_version,
-                    extra_metadata={
-                        **dict(request.metadata),
-                        "confidence": request.confidence,
-                    },
-                )
+            fact_row = Fact(
+                id=fact_id,
+                profile_id=profile_id,
+                subject=subject,
+                predicate=predicate,
+                object=obj,
+                statement=statement,
+                canonical_key=key,
+                project=request.project,
+                topic=request.topic,
+                confidence=request.confidence,
+                status=STATUS_ACTIVE,
+                valid_from=request.valid_from,
+                valid_to=request.valid_to,
+                source_event_ids=list(request.source_event_ids),
+                source_message_ids=list(request.source_message_ids),
+                extractor_name="manual",
+                extractor_version="1",
+                prompt_version=self.fact_prompt_version,
+                model_provider=self.model_provider,
+                model_name=self.model_name,
+                source_scope="message",
+                schema_version=self.schema_version,
+                extra_metadata={
+                    **dict(request.metadata),
+                    "confidence": request.confidence,
+                },
             )
+            session.add(fact_row)
             status = STATUS_ACTIVE
 
         event_id = uuid.uuid4()
+        fact_row.source_event_ids = [
+            uuid.UUID(x)
+            for x in sorted({str(x) for x in (fact_row.source_event_ids or [])} | {str(event_id)})
+        ]
         session.add(
             MemoryEvent(
                 id=event_id,
@@ -154,6 +158,10 @@ class ExtractionService:
                 },
             )
         )
+        # Flush the event before inserting provenance join rows. Postgres enforces
+        # the FK immediately, and without an explicit flush SQLAlchemy can choose
+        # an insert order that writes fact_sources/decision_sources first.
+        await session.flush()
         # Link sources via the join table.
         for source_event_id in request.source_event_ids:
             session.add(
@@ -216,42 +224,48 @@ class ExtractionService:
             existing_active.source_event_ids = [uuid.UUID(x) for x in merged_events]
             existing_active.updated_at = datetime.now(UTC)
             decision_id = existing_active.id
+            decision_row = existing_active
             status = STATUS_ACTIVE
         else:
             decision_id = uuid.uuid4()
-            session.add(
-                Decision(
-                    id=decision_id,
-                    profile_id=profile_id,
-                    project=request.project,
-                    topic=request.topic,
-                    decision=statement,
-                    context="manual remember",
-                    options_considered=list(request.options_considered),
-                    rationale=request.rationale or "",
-                    tradeoffs=dict(request.tradeoffs),
-                    canonical_key=key,
-                    status=STATUS_ACTIVE,
-                    reversible=request.reversible,
-                    decided_at=decided_at,
-                    source_event_ids=list(request.source_event_ids),
-                    source_message_ids=list(request.source_message_ids),
-                    extractor_name="manual",
-                    extractor_version="1",
-                    prompt_version=self.decision_prompt_version,
-                    model_provider=self.model_provider,
-                    model_name=self.model_name,
-                    source_scope="message",
-                    schema_version=self.schema_version,
-                    extra_metadata={
-                        **dict(request.metadata),
-                        "confidence": request.confidence,
-                    },
-                )
+            decision_row = Decision(
+                id=decision_id,
+                profile_id=profile_id,
+                project=request.project,
+                topic=request.topic,
+                decision=statement,
+                context="manual remember",
+                options_considered=list(request.options_considered),
+                rationale=request.rationale or "",
+                tradeoffs=dict(request.tradeoffs),
+                canonical_key=key,
+                status=STATUS_ACTIVE,
+                reversible=request.reversible,
+                decided_at=decided_at,
+                source_event_ids=list(request.source_event_ids),
+                source_message_ids=list(request.source_message_ids),
+                extractor_name="manual",
+                extractor_version="1",
+                prompt_version=self.decision_prompt_version,
+                model_provider=self.model_provider,
+                model_name=self.model_name,
+                source_scope="message",
+                schema_version=self.schema_version,
+                extra_metadata={
+                    **dict(request.metadata),
+                    "confidence": request.confidence,
+                },
             )
+            session.add(decision_row)
             status = STATUS_ACTIVE
 
         event_id = uuid.uuid4()
+        decision_row.source_event_ids = [
+            uuid.UUID(x)
+            for x in sorted(
+                {str(x) for x in (decision_row.source_event_ids or [])} | {str(event_id)}
+            )
+        ]
         session.add(
             MemoryEvent(
                 id=event_id,
@@ -268,6 +282,9 @@ class ExtractionService:
                 },
             )
         )
+        # Same ordering guard as facts: make the generated MemoryEvent visible
+        # before decision_sources references it.
+        await session.flush()
         for source_event_id in request.source_event_ids:
             session.add(
                 DecisionSource(
