@@ -133,18 +133,48 @@ class SiqueiraMemoProvider:
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         return tool_schemas()
 
-    def get_config_schema(self) -> dict[str, Any]:
-        return {
-            "type": "object",
-            "additionalProperties": False,
-            "properties": {
-                "database_url": {"type": "string"},
-                "embedding_provider": {"type": "string", "enum": ["mock", "openai", "local"]},
-                "embedding_model": {"type": "string"},
-                "api_token": {"type": "string"},
-                "queue_backend": {"type": "string", "enum": ["memory", "redis"]},
+    def get_config_schema(self) -> list[dict[str, Any]]:
+        """Return Hermes setup/status-compatible field metadata.
+
+        Hermes' ``memory setup/status`` code expects a list of field dicts, not
+        a JSON Schema object. The plugin YAML can still expose JSON Schema-like
+        metadata for humans, but this runtime hook must match Hermes' provider
+        contract.
+        """
+        return [
+            {
+                "key": "database_url",
+                "description": "Siqueira Postgres/SQLite database URL",
+                "env_var": "SIQUEIRA_DATABASE_URL",
+                "default": "sqlite+aiosqlite:///./siqueira_memo.db",
             },
-        }
+            {
+                "key": "embedding_provider",
+                "description": "Embedding provider",
+                "choices": ["mock", "openai", "local"],
+                "env_var": "SIQUEIRA_EMBEDDING_PROVIDER",
+                "default": "mock",
+            },
+            {
+                "key": "embedding_model",
+                "description": "Embedding model name",
+                "env_var": "SIQUEIRA_EMBEDDING_MODEL",
+                "default": "text-embedding-3-large",
+            },
+            {
+                "key": "queue_backend",
+                "description": "Background queue backend",
+                "choices": ["memory", "redis"],
+                "env_var": "SIQUEIRA_QUEUE_BACKEND",
+                "default": "redis",
+            },
+            {
+                "key": "api_token",
+                "description": "Siqueira API token",
+                "env_var": "SIQUEIRA_API_TOKEN",
+                "secret": True,
+            },
+        ]
 
     def save_config(self, values: dict[str, Any], hermes_home: str | None = None) -> None:
         """Persist operator-supplied configuration.

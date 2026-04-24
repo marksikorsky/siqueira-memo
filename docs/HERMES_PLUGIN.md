@@ -6,51 +6,55 @@ checklist.
 
 ## 1. Install the service
 
+For local operators, use the one-command Docker bootstrap:
+
 ```bash
-git clone <this-repo> /opt/siqueira-memo
+git clone https://github.com/marksikorsky/siqueira-memo.git /opt/siqueira-memo
 cd /opt/siqueira-memo
-python -m venv .venv && source .venv/bin/activate
-pip install -e '.[postgres,queue,otel]'
-cp .env.example .env
-# Edit .env: SIQUEIRA_DATABASE_URL, SIQUEIRA_API_TOKEN, SIQUEIRA_EMBEDDING_PROVIDER…
-alembic upgrade head
+./scripts/bootstrap.sh
 ```
 
-Verify boot:
+This creates `.env`, starts Postgres + pgvector + Redis, runs migrations, starts
+API/worker, and verifies `/healthz` + `/readyz`.
+
+## 2. Wire it into Hermes as the active MemoryProvider
+
+Use the installer:
 
 ```bash
-siqueira-memo      # runs the API on SIQUEIRA_HOST:SIQUEIRA_PORT
-siqueira-memo-worker &   # drains queued jobs in-process
+cd /opt/siqueira-memo
+./scripts/install_hermes_provider.sh
 ```
 
-## 2. Wire the plugin into Hermes
+It does the boring but easy-to-break bits:
 
-The plugin lives at `plugins/memory/siqueira-memo/` inside this repo. Expose
-it on the Hermes plugin path (symlink or copy):
+- installs `siqueira-memo` into the same Python environment used by `hermes`;
+- symlinks the provider to `~/.hermes/plugins/siqueira-memo`;
+- writes `SIQUEIRA_*` connection settings into `~/.hermes/.env`;
+- sets `memory.provider: siqueira-memo` in `~/.hermes/config.yaml`;
+- verifies provider discovery with Hermes' plugin loader.
+
+Important Hermes detail: user-installed memory plugins live directly under
+`$HERMES_HOME/plugins/<provider-name>/`, **not** under
+`$HERMES_HOME/plugins/memory/<provider-name>/`. Bundled Hermes providers live in
+Hermes' own source tree under `plugins/memory/`, but external/user plugins use
+the flatter user-plugin path.
+
+Manual equivalent:
 
 ```bash
-ln -s /opt/siqueira-memo/plugins/memory/siqueira-memo \
-      ~/.hermes/plugins/memory/siqueira-memo
+# Use the Python interpreter from the Hermes console script.
+HERMES_PYTHON="$(head -n1 "$(command -v hermes)" | sed 's/^#!//')"
+"$HERMES_PYTHON" -m pip install -e '/opt/siqueira-memo[postgres,queue,otel]'
+
+mkdir -p ~/.hermes/plugins
+ln -sfn /opt/siqueira-memo/plugins/memory/siqueira-memo ~/.hermes/plugins/siqueira-memo
+
+# Add SIQUEIRA_DATABASE_URL, SIQUEIRA_REDIS_URL, SIQUEIRA_API_TOKEN, etc. to ~/.hermes/.env
+hermes config set memory.provider siqueira-memo
 ```
 
-Then enable it in Hermes config:
-
-```yaml
-# ~/.hermes/config.yaml (excerpt)
-memory:
-  provider: siqueira-memo
-  config:
-    database_url: postgresql+asyncpg://siqueira:***@127.0.0.1:5432/siqueira_memo
-    embedding_provider: openai
-    embedding_model: text-embedding-3-large
-    queue_backend: redis
-    api_token: "${SIQUEIRA_API_TOKEN}"
-```
-
-Hermes will call `register(ctx)` inside the plugin package; the plugin
-forwards to `SiqueiraMemoProvider` from the service package, so the service
-must be importable — either install it (`pip install -e .`) or put `src/` on
-`PYTHONPATH` for the Hermes process.
+Restart Hermes gateway/CLI sessions after changing the active provider.
 
 ## 3. Tools exposed
 

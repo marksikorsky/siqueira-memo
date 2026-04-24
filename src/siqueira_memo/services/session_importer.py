@@ -26,7 +26,11 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from siqueira_memo.logging import get_logger
-from siqueira_memo.models.constants import MESSAGE_SOURCE_HERMES_SESSION_IMPORT, ROLE_USER
+from siqueira_memo.models.constants import (
+    ALL_ROLES,
+    MESSAGE_SOURCE_HERMES_SESSION_IMPORT,
+    ROLE_USER,
+)
 from siqueira_memo.schemas.ingest import MessageIngestIn
 from siqueira_memo.services.ingest_service import IngestService
 
@@ -61,10 +65,19 @@ def iter_sqlite(path: Path) -> Iterator[ImportedMessage]:
     conn = sqlite3.connect(str(path))
     conn.row_factory = sqlite3.Row
     try:
-        for row in conn.execute(
-            "SELECT session_id, role, content, created_at, metadata "
-            "FROM messages ORDER BY created_at ASC"
-        ):
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        created_expr = "created_at" if "created_at" in columns else "timestamp AS created_at"
+        metadata_expr = "metadata" if "metadata" in columns else "NULL AS metadata"
+        platform_expr = "platform" if "platform" in columns else "'hermes' AS platform"
+        query = (
+            f"SELECT session_id, role, content, {created_expr}, {metadata_expr}, {platform_expr} "
+            "FROM messages ORDER BY "
+            + ("created_at ASC" if "created_at" in columns else "timestamp ASC")
+        )
+        for row in conn.execute(query):
             doc = dict(row)
             yield _row_to_message(doc)
     finally:
@@ -108,8 +121,13 @@ class SessionImporter:
         imported = 0
         duplicates = 0
         errors = 0
+        skipped = 0
         for row in rows:
             if not row.content.strip():
+                skipped += 1
+                continue
+            if row.role not in ALL_ROLES:
+                skipped += 1
                 continue
             payload = MessageIngestIn(
                 session_id=row.session_id,
@@ -129,4 +147,9 @@ class SessionImporter:
             except Exception:  # pragma: no cover
                 log.exception("hermes_session.import_failed")
                 errors += 1
-        return {"imported": imported, "duplicates": duplicates, "errors": errors}
+        return {
+            "imported": imported,
+            "duplicates": duplicates,
+            "skipped": skipped,
+            "errors": errors,
+        }

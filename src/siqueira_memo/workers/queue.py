@@ -109,12 +109,18 @@ def build_queue(backend: str) -> JobQueue:
         # a ``JobQueue`` duck-type compatible with the protocol.
         try:
             module = importlib.import_module("siqueira_memo.workers.redis_queue")
+            queue_cls = module.RedisJobQueue
+            queue: JobQueue = queue_cls()
+            return queue
         except ModuleNotFoundError:  # pragma: no cover
             log.warning("queue.redis_unavailable_fallback_memory")
             return MemoryJobQueue()
-        queue_cls = module.RedisJobQueue
-        queue: JobQueue = queue_cls()
-        return queue
+        except Exception as exc:  # pragma: no cover
+            log.warning(
+                "queue.redis_connection_failed_fallback_memory",
+                extra={"error": str(exc)},
+            )
+            return MemoryJobQueue()
     raise ValueError(f"unsupported queue backend: {backend}")
 
 
