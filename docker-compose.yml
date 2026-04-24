@@ -85,6 +85,8 @@ services:
         condition: service_healthy
     environment: *siqueira-env
     command: ["python", "-m", "siqueira_memo.workers.worker"]
+    healthcheck:
+      disable: true
 
 volumes:
   siqueira_pg: {}
