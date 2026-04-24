@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -179,6 +180,25 @@ async def test_register_calls_ctx_register_memory_provider():
     module.register(Ctx())
     assert len(recorded) == 1
     assert recorded[0].name == "siqueira-memo"
+
+
+@pytest.mark.asyncio
+async def test_run_uses_stable_event_loop_when_called_from_async_context():
+    from siqueira_memo.hermes_provider import provider as provider_module
+
+    seen_loop: asyncio.AbstractEventLoop | None = None
+
+    async def bind_to_first_loop() -> str:
+        nonlocal seen_loop
+        loop = asyncio.get_running_loop()
+        if seen_loop is None:
+            seen_loop = loop
+            return "ok"
+        assert loop is seen_loop
+        return "ok"
+
+    assert provider_module._run(bind_to_first_loop()) == "ok"
+    assert provider_module._run(bind_to_first_loop()) == "ok"
 
 
 @pytest.mark.asyncio

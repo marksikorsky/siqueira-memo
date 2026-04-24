@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -123,9 +124,10 @@ class SiqueiraMemoProvider:
         queue = self._queue
         if queue is not None:
             with suppress(RuntimeError):
-                asyncio.run(queue.drain())
+                _run(queue.drain())
         with suppress(RuntimeError):
-            asyncio.run(dispose_engines())
+            _run(dispose_engines())
+        _RUNNER.close()
 
     # ------------------------------------------------------------------
     # Tool schemas & dispatch
@@ -541,20 +543,82 @@ def _parse_dt(value: Any) -> Any:
     return None
 
 
-def _run(coro: Any) -> str:
-    """Run a coroutine regardless of whether we are already in an event loop.
+class _ProviderLoopRunner:
+    """Run provider coroutines on one long-lived event loop.
 
-    Hermes may invoke ``handle_tool_call`` from an async loop (turn execution)
-    or synchronously (test harness). We always want a blocking result.
+    Hermes calls MemoryProvider tool hooks through a synchronous interface while
+    the agent itself is usually already inside an event loop. Creating a fresh
+    thread+loop per tool call leaves SQLAlchemy's asyncpg pool holding
+    connections bound to dead/different loops, which can surface as asyncpg's
+    ``another operation is in progress`` error on later recalls.
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        result: str = asyncio.run(coro)
-        return result
-    # Already running — run in a dedicated thread so we do not deadlock.
-    import concurrent.futures
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(asyncio.run, coro)
-        return str(future.result())
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._ready = threading.Event()
+        self._closed = False
+
+    def run(self, coro: Any) -> Any:
+        loop = self._ensure_loop()
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+        return future.result()
+
+    def _ensure_loop(self) -> asyncio.AbstractEventLoop:
+        with self._lock:
+            if self._loop is not None and self._loop.is_running():
+                return self._loop
+            if self._closed:
+                self._closed = False
+            self._ready.clear()
+            self._thread = threading.Thread(
+                target=self._run_loop,
+                name="siqueira-memo-provider-loop",
+                daemon=True,
+            )
+            self._thread.start()
+        self._ready.wait(timeout=5)
+        if self._loop is None:  # pragma: no cover - catastrophic startup failure
+            raise RuntimeError("Siqueira provider event loop did not start")
+        return self._loop
+
+    def _run_loop(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        self._ready.set()
+        loop.run_forever()
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+
+    def close(self) -> None:
+        with self._lock:
+            loop = self._loop
+            thread = self._thread
+            self._loop = None
+            self._thread = None
+            self._closed = True
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=5)
+
+
+_RUNNER = _ProviderLoopRunner()
+
+
+def _run(coro: Any) -> str:
+    """Run a provider coroutine through one stable background event loop.
+
+    The stable loop keeps asyncpg/SQLAlchemy pooled connections on the same
+    event loop across consecutive Hermes tool calls and avoids overlapping work
+    on loop-bound driver state.
+    """
+    result = _RUNNER.run(coro)
+    return str(result)
