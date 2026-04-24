@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from siqueira_memo.api.routes_admin import router as admin_router
+from siqueira_memo.api.routes_admin_ui import router as admin_ui_router
 from siqueira_memo.api.routes_health import router as health_router
 from siqueira_memo.api.routes_ingest import router as ingest_router
 from siqueira_memo.api.routes_memory import router as memory_router
@@ -47,6 +48,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(recall_router)
     app.include_router(memory_router)
     app.include_router(admin_router)
+    app.include_router(admin_ui_router)
     return app
 
 

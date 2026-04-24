@@ -102,7 +102,13 @@ Routes (all POSTs require `Authorization: Bearer $SIQUEIRA_API_TOKEN`):
 | POST   | `/v1/memory/forget`                 | soft/hard delete                    |
 | POST   | `/v1/memory/timeline`               | decisions + facts chronologically   |
 | POST   | `/v1/memory/sources`                | provenance resolver                 |
+| GET    | `/admin`                            | zero-build browser admin UI         |
 | POST   | `/v1/admin/search`                  | admin search                        |
+
+The `/admin` UI is a small light-themed HTML/CSS/vanilla-JS console. It stores
+`SIQUEIRA_API_TOKEN` only in browser `localStorage` and calls the authenticated
+API endpoints with a Bearer token; keep the service bound to localhost unless you
+put real auth in front.
 
 ## Run the worker
 

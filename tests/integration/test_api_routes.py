@@ -74,6 +74,25 @@ async def test_ingest_requires_auth(api_client):
 
 
 @pytest.mark.asyncio
+async def test_admin_ui_is_lightweight_mobile_friendly_and_unauthenticated(api_client):
+    client, _settings = api_client
+    resp = await client.get("/admin")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/html")
+    html = resp.text
+    assert "Siqueira Memo" in html
+    assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in html
+    assert "linear-gradient" not in html.lower()
+    assert "react" not in html.lower()
+    assert "@media (max-width: 720px)" in html
+    assert "localStorage" in html
+    assert "/v1/admin/search" in html
+    assert "/v1/memory/timeline" in html
+    assert "/v1/memory/sources" in html
+    assert "--bg: #fbfaf8" in html
+
+
+@pytest.mark.asyncio
 async def test_full_roundtrip(api_client):
     client, settings = api_client
     auth = _auth(settings)
