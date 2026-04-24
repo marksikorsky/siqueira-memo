@@ -65,6 +65,40 @@ wait_http() {
   return 1
 }
 
+install_hermes_provider_if_requested() {
+  local mode="${SIQUEIRA_INSTALL_HERMES_PROVIDER:-auto}"
+  local hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+  local config_path="${HERMES_CONFIG_PATH:-$hermes_home/config.yaml}"
+
+  case "$mode" in
+    0|false|False|no|NO|skip|disabled)
+      echo "Skipping Hermes MemoryProvider install (SIQUEIRA_INSTALL_HERMES_PROVIDER=$mode)."
+      return 0
+      ;;
+    1|true|True|yes|YES|force)
+      ;;
+    auto|"")
+      if ! command -v hermes >/dev/null 2>&1; then
+        echo "Hermes binary not found; skipping Hermes MemoryProvider install."
+        echo "Run ./scripts/install_hermes_provider.sh later on the Hermes host."
+        return 0
+      fi
+      if [[ ! -f "$config_path" ]]; then
+        echo "Hermes config not found at $config_path; skipping Hermes MemoryProvider install."
+        echo "Run ./scripts/install_hermes_provider.sh after Hermes is configured."
+        return 0
+      fi
+      ;;
+    *)
+      echo "Unsupported SIQUEIRA_INSTALL_HERMES_PROVIDER=$mode (use auto/true/false)." >&2
+      return 1
+      ;;
+  esac
+
+  echo "Installing Siqueira as the active Hermes MemoryProvider..."
+  "$ROOT/scripts/install_hermes_provider.sh"
+}
+
 main() {
   need docker
   need curl
@@ -124,6 +158,8 @@ EOF
   echo "Smoke-checking readiness..."
   curl -fsS "http://127.0.0.1:$(read_env SIQUEIRA_PUBLIC_PORT)/readyz" | python3 -m json.tool
 
+  install_hermes_provider_if_requested
+
   cat <<EOF
 
 Siqueira Memo is up.
@@ -131,7 +167,7 @@ Siqueira Memo is up.
 API:      http://127.0.0.1:$(read_env SIQUEIRA_PUBLIC_PORT)
 Health:   http://127.0.0.1:$(read_env SIQUEIRA_PUBLIC_PORT)/healthz
 Ready:    http://127.0.0.1:$(read_env SIQUEIRA_PUBLIC_PORT)/readyz
-Token:    $(read_env SIQUEIRA_API_TOKEN)
+Token:    stored in .env as SIQUEIRA_API_TOKEN
 
 Useful commands:
   docker compose ps

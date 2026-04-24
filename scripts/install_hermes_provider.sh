@@ -13,6 +13,45 @@ PLUGIN_DST="$HERMES_HOME/plugins/siqueira-memo"
 log() { printf '[siqueira-hermes-install] %s\n' "$*"; }
 fatal() { printf '[siqueira-hermes-install] ERROR: %s\n' "$*" >&2; exit 1; }
 
+restart_hermes_gateway_if_requested() {
+  local mode="${SIQUEIRA_RESTART_HERMES_GATEWAY:-auto}"
+  case "$mode" in
+    0|false|False|no|NO|skip|disabled)
+      log "skipping Hermes gateway restart (SIQUEIRA_RESTART_HERMES_GATEWAY=$mode)"
+      return 0
+      ;;
+    1|true|True|yes|YES|force|auto|"")
+      ;;
+    *)
+      fatal "unsupported SIQUEIRA_RESTART_HERMES_GATEWAY=$mode (use auto/true/false)"
+      ;;
+  esac
+
+  if [[ "$mode" == "auto" || -z "$mode" ]]; then
+    if ! "$HERMES_BIN" gateway status >/tmp/siqueira-hermes-gateway-status.log 2>&1; then
+      log "Hermes gateway status unavailable; not restarting gateway"
+      sed -n '1,80p' /tmp/siqueira-hermes-gateway-status.log >&2 || true
+      return 0
+    fi
+    if ! grep -Eiq 'running|active' /tmp/siqueira-hermes-gateway-status.log; then
+      log "Hermes gateway does not look active; not restarting gateway"
+      return 0
+    fi
+  fi
+
+  log "restarting Hermes gateway so the new MemoryProvider is loaded"
+  if "$HERMES_BIN" gateway restart >/tmp/siqueira-hermes-gateway-restart.log 2>&1; then
+    sed -n '1,120p' /tmp/siqueira-hermes-gateway-restart.log
+    log "Hermes gateway restarted"
+  else
+    sed -n '1,160p' /tmp/siqueira-hermes-gateway-restart.log >&2 || true
+    if [[ "$mode" == "force" || "$mode" == "1" || "$mode" == "true" || "$mode" == "True" || "$mode" == "yes" || "$mode" == "YES" ]]; then
+      fatal "Hermes gateway restart failed"
+    fi
+    log "Hermes gateway restart failed; continue, but restart it manually before using Siqueira"
+  fi
+}
+
 [[ -n "$HERMES_BIN" ]] || fatal "hermes binary not found in PATH"
 [[ -f "$CONFIG_PATH" ]] || fatal "Hermes config not found: $CONFIG_PATH"
 [[ -d "$PLUGIN_SRC" ]] || fatal "plugin source not found: $PLUGIN_SRC"
@@ -197,4 +236,6 @@ PY
 log "verifying Hermes memory status"
 "$HERMES_BIN" memory status | sed -n '1,80p'
 
-log "done. Restart Hermes gateway/CLI sessions for the new provider to take effect."
+restart_hermes_gateway_if_requested
+
+log "done. Existing CLI sessions still need /reset or restart for the new provider to take effect."

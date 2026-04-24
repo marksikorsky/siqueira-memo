@@ -15,7 +15,9 @@ cd /opt/siqueira-memo
 ```
 
 This creates `.env`, starts Postgres + pgvector + Redis, runs migrations, starts
-API/worker, and verifies `/healthz` + `/readyz`.
+API/worker, verifies `/healthz` + `/readyz`, and, if Hermes is installed on the
+same host, calls `scripts/install_hermes_provider.sh` automatically. Set
+`SIQUEIRA_INSTALL_HERMES_PROVIDER=false` to bootstrap only the service.
 
 ## 2. Wire it into Hermes as the active MemoryProvider
 
@@ -32,7 +34,9 @@ It does the boring but easy-to-break bits:
 - symlinks the provider to `~/.hermes/plugins/siqueira-memo`;
 - writes `SIQUEIRA_*` connection settings into `~/.hermes/.env`;
 - sets `memory.provider: siqueira-memo` in `~/.hermes/config.yaml`;
-- verifies provider discovery with Hermes' plugin loader.
+- verifies provider discovery with Hermes' plugin loader;
+- restarts the Hermes gateway when it is running, so Telegram/Discord/etc. pick
+  up the new provider immediately.
 
 Important Hermes detail: user-installed memory plugins live directly under
 `$HERMES_HOME/plugins/<provider-name>/`, **not** under
@@ -54,7 +58,8 @@ ln -sfn /opt/siqueira-memo/plugins/memory/siqueira-memo ~/.hermes/plugins/siquei
 hermes config set memory.provider siqueira-memo
 ```
 
-Restart Hermes gateway/CLI sessions after changing the active provider.
+`SIQUEIRA_RESTART_HERMES_GATEWAY=false ./scripts/install_hermes_provider.sh`
+if you want to restart it yourself.
 
 ## 3. Tools exposed
 

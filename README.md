@@ -18,9 +18,18 @@ lexical + vector) recall to Hermes through a `MemoryProvider` plugin.
 ```
 
 That script generates a local `.env`, pulls `pgvector/pgvector:pg16` + Redis,
-builds the app image, runs Alembic migrations, starts API + worker, and smoke
-checks `/healthz` + `/readyz`. No manual Postgres/pgvector setup; no embedding
-API key needed because local bootstrap defaults to `SIQUEIRA_EMBEDDING_PROVIDER=mock`.
+builds the app image, runs Alembic migrations, starts API + worker, smoke
+checks `/healthz` + `/readyz`, and — when Hermes is installed on the same host —
+automatically installs Siqueira as the active Hermes `MemoryProvider`, updates
+`~/.hermes/.env` + `~/.hermes/config.yaml`, and restarts the Hermes gateway.
+No manual Postgres/pgvector setup; no embedding API key needed because local
+bootstrap defaults to `SIQUEIRA_EMBEDDING_PROVIDER=mock`.
+
+Disable Hermes wiring when you only want the service:
+
+```bash
+SIQUEIRA_INSTALL_HERMES_PROVIDER=false ./scripts/bootstrap.sh
+```
 
 See [`docs/INSTALL.md`](docs/INSTALL.md) for operator details.
 

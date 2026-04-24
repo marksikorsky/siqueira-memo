@@ -26,10 +26,27 @@ The script will:
 4. start Postgres + Redis;
 5. run `alembic upgrade head`;
 6. start API + worker;
-7. verify `/healthz` and `/readyz`.
+7. verify `/healthz` and `/readyz`;
+8. if Hermes is present, install the `siqueira-memo` MemoryProvider, write
+   `SIQUEIRA_*` settings into `~/.hermes/.env`, set
+   `memory.provider: siqueira-memo` in `~/.hermes/config.yaml`, verify Hermes
+   provider discovery, and restart the Hermes gateway if it is running.
 
 No real LLM or embedding API key is required for the default local install:
 `SIQUEIRA_EMBEDDING_PROVIDER=mock` is used.
+
+## Options
+
+```bash
+# Start only the Docker service; do not touch Hermes.
+SIQUEIRA_INSTALL_HERMES_PROVIDER=false ./scripts/bootstrap.sh
+
+# Force Hermes install/restart failures to be fatal in the provider installer.
+SIQUEIRA_RESTART_HERMES_GATEWAY=force ./scripts/install_hermes_provider.sh
+
+# Install provider but do not restart gateway.
+SIQUEIRA_RESTART_HERMES_GATEWAY=false ./scripts/install_hermes_provider.sh
+```
 
 ## Useful commands
 
