@@ -55,6 +55,8 @@ _ADMIN_HTML = """<!doctype html>
     input:focus, select:focus, textarea:focus { border-color: rgba(29,111,216,.55); box-shadow: 0 0 0 4px rgba(29,111,216,.12); }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+    .compact-actions { margin-top: 10px; }
+    .compact-actions .btn { min-height: 36px; padding: 8px 10px; font-size: 13px; }
     .btn { border: 1px solid var(--line); border-radius: 12px; min-height: 42px; padding: 10px 13px; background: var(--surface); color: var(--text); font-weight: 680; }
     .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
     .btn.primary:hover { background: var(--accent-dark); }
@@ -124,7 +126,11 @@ _ADMIN_HTML = """<!doctype html>
         <input id="profile" placeholder="default" value="default">
 
         <label for="project">Project filter</label>
-        <input id="project" placeholder="e.g. brazil-tax-crypto">
+        <input id="project" placeholder="e.g. brazil-tax-crypto" value="siqueira-memo">
+        <div class="actions compact-actions">
+          <button class="btn" id="load-siqueira" type="button">Siqueira project</button>
+          <button class="btn" id="load-tax" type="button">Brazil tax</button>
+        </div>
 
         <label for="topic">Topic filter</label>
         <input id="topic" placeholder="optional">
@@ -194,12 +200,15 @@ _ADMIN_HTML = """<!doctype html>
 
   <script>
     const $ = (id) => document.getElementById(id);
+    const params = new URLSearchParams(window.location.search);
     const state = {
       token: localStorage.getItem('siqueira.apiToken') || '',
-      profile: localStorage.getItem('siqueira.profile') || 'default'
+      profile: params.get('profile') || localStorage.getItem('siqueira.profile') || 'default',
+      project: params.get('project') || localStorage.getItem('siqueira.project') || 'siqueira-memo'
     };
     $('token').value = state.token;
     $('profile').value = state.profile;
+    $('project').value = state.project;
 
     function authHeaders() {
       const token = $('token').value.trim();
@@ -247,6 +256,7 @@ _ADMIN_HTML = """<!doctype html>
     $('save-token').onclick = () => {
       localStorage.setItem('siqueira.apiToken', $('token').value.trim());
       localStorage.setItem('siqueira.profile', $('profile').value.trim() || 'default');
+      localStorage.setItem('siqueira.project', $('project').value.trim() || '');
       setStatus('connection-status', 'Saved locally.', 'good');
     };
     $('check-ready').onclick = async () => {
@@ -257,22 +267,35 @@ _ADMIN_HTML = """<!doctype html>
         setStatus('connection-status', body.ok ? 'API ready. Database reachable.' : 'API responded but is not ready.', body.ok ? 'good' : 'danger');
       } catch (err) { setStatus('connection-status', err.message, 'danger'); }
     };
-    $('run-search').onclick = async () => {
+    async function runSearch() {
       setStatus('search-status', 'Searching…');
       try {
         const body = await post('/v1/admin/search', { ...filters(), query: $('query').value.trim() || null, target_type: $('target-type').value, status: $('status-filter').value || null, limit: 50 });
-        setStatus('search-status', `${body.total} result(s).`, 'good');
+        setStatus('search-status', `${body.total} result(s) for ${$('project').value.trim() || 'all projects'}.`, 'good');
         renderHits('search-results', body.hits || []);
       } catch (err) { setStatus('search-status', err.message, 'danger'); }
-    };
-    $('load-timeline').onclick = async () => {
+    }
+    async function loadTimeline() {
       setStatus('timeline-status', 'Loading…');
       try {
         const body = await post('/v1/memory/timeline', { ...filters(), limit: 50 });
-        setStatus('timeline-status', `${body.entries.length} timeline item(s).`, 'good');
+        setStatus('timeline-status', `${body.entries.length} timeline item(s) for ${$('project').value.trim() || 'all projects'}.`, 'good');
         renderHits('timeline-results', (body.entries || []).map(e => ({...e, target_type: e.kind, preview: e.preview})));
       } catch (err) { setStatus('timeline-status', err.message, 'danger'); }
-    };
+    }
+    function loadDefaultProject(project) {
+      $('project').value = project;
+      $('topic').value = '';
+      $('query').value = '';
+      $('target-type').value = 'fact';
+      localStorage.setItem('siqueira.project', project);
+      runSearch();
+      loadTimeline();
+    }
+    $('run-search').onclick = runSearch;
+    $('load-timeline').onclick = loadTimeline;
+    $('load-siqueira').onclick = () => loadDefaultProject('siqueira-memo');
+    $('load-tax').onclick = () => loadDefaultProject('brazil-tax-crypto');
     $('remember-kind').onchange = () => {
       const isFact = $('remember-kind').value === 'fact';
       $('fact-fields').style.display = isFact ? '' : 'none';
@@ -305,7 +328,8 @@ _ADMIN_HTML = """<!doctype html>
         setStatus('sources-status', `Soft-deleted. Event ${body.event_id}`, 'good');
       } catch (err) { setStatus('sources-status', err.message, 'danger'); }
     };
-    $('query').addEventListener('keydown', (event) => { if (event.key === 'Enter') $('run-search').click(); });
+    $('query').addEventListener('keydown', (event) => { if (event.key === 'Enter') runSearch(); });
+    window.addEventListener('load', () => loadDefaultProject($('project').value.trim() || 'siqueira-memo'));
   </script>
 </body>
 </html>

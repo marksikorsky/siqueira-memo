@@ -86,6 +86,9 @@ async def test_admin_ui_is_lightweight_mobile_friendly_and_unauthenticated(api_c
     assert "react" not in html.lower()
     assert "@media (max-width: 720px)" in html
     assert "localStorage" in html
+    assert 'value="siqueira-memo"' in html
+    assert "Siqueira project" in html
+    assert "loadDefaultProject" in html
     assert "/v1/admin/search" in html
     assert "/v1/memory/timeline" in html
     assert "/v1/memory/sources" in html
