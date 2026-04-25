@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     memory_capture_target_ratio: float = 0.8
     memory_capture_save_raw_turns: bool = True
     memory_capture_extract_structured: bool = True
+    memory_capture_llm_enabled: bool = False
+    memory_capture_llm_base_url: str = ""
+    memory_capture_llm_api_key: SecretStr = Field(default=SecretStr(""))
+    memory_capture_llm_model: str = "gpt-5"
+    memory_capture_llm_timeout_seconds: float = 30.0
 
     database_url: str = "sqlite+aiosqlite:///./siqueira_memo.db"
     database_echo: bool = False

@@ -196,6 +196,90 @@ async def test_sync_turn_promotes_useful_link_based_architecture_analysis(provid
 
 
 @pytest.mark.asyncio
+async def test_sync_turn_uses_llm_classifier_for_non_marker_useful_memory(provider, monkeypatch):
+    import siqueira_memo.workers.jobs as jobs
+    from siqueira_memo.services.memory_capture_classifier import MemoryCaptureDecision
+
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+    set_worker_settings(settings.model_copy(update={"memory_capture_llm_enabled": True}))
+
+    def fake_classify(*_args, **_kwargs):
+        return MemoryCaptureDecision(
+            save=True,
+            kind="fact",
+            statement="Mark's cold standby host for quick rollback is node amber-17 at 10.44.0.17.",
+            subject="cold standby host",
+            predicate="is",
+            object="node amber-17 at 10.44.0.17",
+            project="infrastructure",
+            topic="servers",
+            confidence=0.91,
+            rationale="Stable infrastructure inventory useful for future operations.",
+        )
+
+    monkeypatch.setattr(jobs, "classify_turn_memory", fake_classify)
+    prov.sync_turn(
+        "на всякий: холодный резерв для быстрого отката — amber-17, адрес 10.44.0.17",
+        "Принял.",
+        session_id="s-llm-useful",
+    )
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        facts = (
+            await session.execute(
+                select(Fact)
+                .where(Fact.profile_id == prov._profile_id)  # noqa: SLF001
+                .where(Fact.statement.ilike("%amber-17%"))
+            )
+        ).scalars().all()
+        assert facts
+        assert facts[0].project == "infrastructure"
+        assert facts[0].topic == "servers"
+
+
+@pytest.mark.asyncio
+async def test_sync_turn_respects_llm_classifier_ignore(provider, monkeypatch):
+    import siqueira_memo.workers.jobs as jobs
+    from siqueira_memo.services.memory_capture_classifier import MemoryCaptureDecision
+
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+    set_worker_settings(settings.model_copy(update={"memory_capture_llm_enabled": True}))
+
+    monkeypatch.setattr(
+        jobs,
+        "classify_turn_memory",
+        lambda *_args, **_kwargs: MemoryCaptureDecision(
+            save=False,
+            kind="fact",
+            statement="",
+            confidence=0.99,
+            rationale="Casual acknowledgement/no durable content.",
+        ),
+    )
+    prov.sync_turn("ок", "👍", session_id="s-llm-ignore")
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        facts = (
+            await session.execute(select(Fact).where(Fact.profile_id == prov._profile_id))  # noqa: SLF001
+        ).scalars().all()
+        decisions = (
+            await session.execute(select(Decision).where(Decision.profile_id == prov._profile_id))  # noqa: SLF001
+        ).scalars().all()
+        assert not facts
+        assert not decisions
+
+
+@pytest.mark.asyncio
 async def test_sync_turn_promotes_tailscale_server_inventory(provider):
     prov, settings, queue = provider
     register_default_handlers(queue)

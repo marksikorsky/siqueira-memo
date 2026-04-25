@@ -44,6 +44,10 @@ from siqueira_memo.services.embedding_service import (
 from siqueira_memo.services.extraction_gate import default_gate
 from siqueira_memo.services.extraction_service import ExtractionService
 from siqueira_memo.services.ingest_service import IngestService
+from siqueira_memo.services.memory_capture_classifier import (
+    MemoryCaptureDecision,
+    classify_turn_memory,
+)
 from siqueira_memo.services.retrieval_service import RetrievalService
 from siqueira_memo.services.scope_classifier import classify_memory_scope
 from siqueira_memo.workers.queue import Job, JobQueue, get_default_queue
@@ -518,36 +522,57 @@ async def extract_turn_memory_handler(payload: dict[str, Any]) -> None:
     user_content = str(payload.get("user_content") or "")
     assistant_content = str(payload.get("assistant_content") or "")
     combined = "\n".join(part for part in (user_content, assistant_content) if part.strip())
-    if not _looks_useful_for_structured_memory(combined):
-        return
-
     source_event_ids = [uuid.UUID(str(x)) for x in payload.get("source_event_ids", [])]
     source_message_ids = [uuid.UUID(str(x)) for x in payload.get("source_message_ids", [])]
     project = payload.get("project")
     topic = payload.get("topic") or "conversation"
+
+    llm_capture = classify_turn_memory(
+        ctx.settings,
+        user_content=user_content,
+        assistant_content=assistant_content,
+        default_project=project,
+        default_topic=topic,
+    )
+    if llm_capture is not None:
+        if not llm_capture.save:
+            return
+        capture = llm_capture
+        model_provider = "openai-compatible"
+        model_name = ctx.settings.memory_capture_llm_model
+    else:
+        if not _looks_useful_for_structured_memory(combined):
+            return
+        capture = _heuristic_capture(combined, user_content, assistant_content, project, topic)
+        model_provider = "heuristic"
+        model_name = "aggressive-v1"
+
     svc = ExtractionService(
         profile_id=profile_id,
         actor="siqueira-capture",
-        model_provider="heuristic",
-        model_name="aggressive-v1",
+        model_provider=model_provider,
+        model_name=model_name,
     )
     factory = get_session_factory(ctx.settings)
     async with factory() as session:
-        if _looks_like_decision(combined):
+        if capture.kind == "decision":
             await svc.remember(
                 session,
                 RememberRequest(
                     profile_id=profile_id,
                     session_id=session_id,
                     kind="decision",
-                    statement=_decision_statement(user_content, assistant_content),
-                    project=project,
-                    topic=topic,
-                    rationale="Aggressive turn capture detected decision/preference language.",
-                    confidence=0.9,
+                    statement=capture.statement,
+                    project=capture.project,
+                    topic=capture.topic or topic,
+                    rationale=capture.rationale,
+                    confidence=capture.confidence or 0.9,
                     source_event_ids=source_event_ids,
                     source_message_ids=source_message_ids,
-                    metadata={"capture_mode": payload.get("mode", "aggressive")},
+                    metadata={
+                        "capture_mode": payload.get("mode", "aggressive"),
+                        "capture_classifier": model_provider,
+                    },
                 ),
             )
         else:
@@ -557,19 +582,53 @@ async def extract_turn_memory_handler(payload: dict[str, Any]) -> None:
                     profile_id=profile_id,
                     session_id=session_id,
                     kind="fact",
-                    subject="conversation",
-                    predicate="captured",
-                    object=_fact_object(combined),
-                    statement=_fact_statement(combined),
-                    project=project,
-                    topic=topic,
-                    confidence=0.82,
+                    subject=capture.subject or "conversation",
+                    predicate=capture.predicate or "captured",
+                    object=capture.object or _fact_object(capture.statement),
+                    statement=capture.statement,
+                    project=capture.project,
+                    topic=capture.topic or topic,
+                    confidence=capture.confidence or 0.82,
                     source_event_ids=source_event_ids,
                     source_message_ids=source_message_ids,
-                    metadata={"capture_mode": payload.get("mode", "aggressive")},
+                    metadata={
+                        "capture_mode": payload.get("mode", "aggressive"),
+                        "capture_classifier": model_provider,
+                    },
                 ),
             )
         await session.commit()
+
+
+def _heuristic_capture(
+    combined: str,
+    user_content: str,
+    assistant_content: str,
+    project: str | None,
+    topic: str | None,
+) -> MemoryCaptureDecision:
+    if _looks_like_decision(combined):
+        return MemoryCaptureDecision(
+            save=True,
+            kind="decision",
+            statement=_decision_statement(user_content, assistant_content),
+            project=project,
+            topic=topic,
+            confidence=0.9,
+            rationale="Aggressive turn capture detected decision/preference language.",
+        )
+    return MemoryCaptureDecision(
+        save=True,
+        kind="fact",
+        statement=_fact_statement(combined),
+        subject="conversation",
+        predicate="captured",
+        object=_fact_object(combined),
+        project=project,
+        topic=topic,
+        confidence=0.82,
+        rationale="Aggressive turn capture detected useful factual content.",
+    )
 
 
 def _looks_useful_for_structured_memory(text: str) -> bool:
