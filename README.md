@@ -1,225 +1,406 @@
 # Siqueira Memo
 
-Production-grade, Hermes-native long-term memory. Canonical architecture lives
-in [`IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md). This README is the
-operator-facing quickstart.
+**Hermes-native long-term memory that remembers like a careful engineer, not like a sticky note.**
+
+Siqueira Memo captures conversations, tool output, artifacts, decisions, corrections, and provenance; redacts secrets before anything reaches embeddings or LLMs; and gives Hermes a source-backed recall layer with facts, decisions, summaries, chunks, conflicts, and audit trails.
+
+It is designed for one boring but important job: make future agent runs know what we already learned, while still letting live user instructions and fresh tool output win.
+
+## Why it exists
+
+Normal assistant memory is usually one of two bad things:
+
+- a tiny global text blob that gets stale and impossible to audit;
+- raw transcript search with no structure, provenance, or deletion story.
+
+Siqueira sits between Hermes and Postgres/pgvector and gives memory actual shape:
+
+- **raw events stay as the source of truth**;
+- **derived facts/decisions are rebuildable**;
+- **every durable memory can point back to source events/messages**;
+- **corrections supersede old memory instead of silently overwriting it**;
+- **conflicts are surfaced, not flattened into a fake single truth**.
 
 ## What it does
 
-Siqueira Memo stores raw conversations, tool events, and artifacts with
-per-profile provenance, redacts secrets before any embedding/LLM path, extracts
-facts/decisions with canonical-key dedupe, and serves hybrid (structured +
-lexical + vector) recall to Hermes through a `MemoryProvider` plugin.
+### 1. Captures the important stuff automatically
 
-## One-command install (recommended)
+The Hermes provider records completed turns through a non-blocking queue. In aggressive capture mode it can store:
+
+- user and assistant messages;
+- tool calls and redacted tool outputs;
+- artifacts/files;
+- subagent delegation observations;
+- Hermes context-compaction summaries;
+- mirrored writes from Hermes' built-in memory tool;
+- session-end summaries and pre-compression extraction markers.
+
+A scope classifier attaches project/topic metadata where it can. A memory-capture classifier then decides whether the turn deserves promotion into structured memory.
+
+Capture can run in two layers:
+
+- **LLM classifier** — optional OpenAI-compatible `/chat/completions` endpoint, redacted input, JSON-only output;
+- **heuristic fallback** — deterministic useful-signal matcher for preferences, decisions, infra facts, tax/accounting facts, repo analyses, Tailscale/server inventory, architecture notes, and similar durable information.
+
+### 2. Stores structured memory, not just text
+
+Siqueira promotes durable information into:
+
+- **facts** — subject / predicate / object / statement / confidence / validity window;
+- **decisions** — topic / decision / rationale / tradeoffs / reversibility / status;
+- **summaries** — session/topic summaries for compact context;
+- **chunks** — redacted searchable slices of messages, tool output, and artifacts;
+- **source links** — event/message IDs backing every promoted memory;
+- **conflicts** — detected disagreements between active memories.
+
+Statuses matter: active, superseded, invalidated, deleted. The point is to keep history honest.
+
+### 3. Recalls memory in useful packs
+
+Recall combines structured memory with lexical/vector chunk retrieval and returns a compact `ContextPack`:
+
+- `answer_context` — short prompt-ready summary;
+- `decisions`;
+- `facts`;
+- `chunks`;
+- `summaries`;
+- `source_snippets`;
+- `conflicts`;
+- `confidence`;
+- `warnings`;
+- `token_estimate`.
+
+Supported modes:
+
+| mode | use when | shape |
+|---|---|---|
+| `fast` | lightweight hinting | smallest pack |
+| `balanced` | default agent recall | prompt-safe, source-backed |
+| `deep` | user asks for depth | more facts/chunks/summaries |
+| `forensic` | provenance-heavy investigation | widest pack; not for automatic prefetch |
+
+Recall supports project/topic/entity filters and logs retrieval diagnostics for later audit.
+
+### 4. Lets the agent manage memory explicitly
+
+Hermes gets six native tools:
+
+| tool | purpose |
+|---|---|
+| `siqueira_memory_recall` | retrieve source-backed context |
+| `siqueira_memory_remember` | persist a fact or decision |
+| `siqueira_memory_correct` | supersede/replace stale memory |
+| `siqueira_memory_forget` | soft-delete or hard-delete memory |
+| `siqueira_memory_timeline` | view facts/decisions chronologically |
+| `siqueira_memory_sources` | resolve memory back to source events/messages |
+
+The provider also supports Hermes lifecycle hooks: `system_prompt_block`, `prefetch`, `queue_prefetch`, `sync_turn`, `on_pre_compress`, `on_session_end`, `on_memory_write`, `on_delegation`, `on_turn_start`, and `shutdown`.
+
+Prefetch warming can use Redis so the next turn gets a cached context pack without blocking the current one.
+
+### 5. Includes a built-in admin UI
+
+Open `/admin` for a lightweight browser console — no frontend build step, just FastAPI serving HTML/CSS/vanilla JS.
+
+The dashboard includes:
+
+- project overview cards with fact/decision/message/summary counts;
+- timeline and recent memory views;
+- search across facts, decisions, messages, and summaries;
+- detail drawer with provenance;
+- recall playground for testing context packs;
+- capture counters and recent global memories;
+- manual remember/correct forms;
+- conflict scan/list/resolve API support;
+- audit log viewer;
+- source lookup;
+- soft delete;
+- Markdown export by project/topic.
+
+Admin auth is optional but built in: set `SIQUEIRA_ADMIN_PASSWORD` and `SIQUEIRA_ADMIN_SESSION_SECRET` to enable form login with a signed `HttpOnly` / `SameSite=Lax` session cookie. API clients can still use bearer tokens.
+
+## Architecture
+
+```text
+Hermes
+  └─ MemoryProvider plugin
+      ├─ tools: recall / remember / correct / forget / timeline / sources
+      ├─ hooks: sync_turn / prefetch / session_end / delegation / memory_write
+      └─ queue jobs
+
+Siqueira API + Worker
+  ├─ ingest pipeline
+  │   ├─ redaction
+  │   ├─ raw event archive
+  │   ├─ message/tool/artifact storage
+  │   ├─ chunking
+  │   ├─ embeddings
+  │   └─ structured memory capture
+  ├─ recall pipeline
+  │   ├─ facts + decisions first
+  │   ├─ lexical/vector chunks
+  │   ├─ summaries
+  │   └─ conflict warnings
+  └─ admin / audit / export
+
+Postgres + pgvector + Redis
+  ├─ source events/messages/tool events/artifacts
+  ├─ facts/decisions/summaries/entities
+  ├─ chunks + embedding tables
+  ├─ retrieval logs
+  └─ deletion/audit/conflict records
+```
+
+SQLite and in-memory queue are supported for tests/dev, but production wants Postgres + pgvector + Redis.
+
+## One-command install
 
 ```bash
 ./scripts/bootstrap.sh
 ```
 
-That script generates a local `.env`, pulls `pgvector/pgvector:pg16` + Redis,
-builds the app image, runs Alembic migrations, starts API + worker, smoke
-checks `/healthz` + `/readyz`, and — when Hermes is installed on the same host —
-automatically installs Siqueira as the active Hermes `MemoryProvider`, updates
-`~/.hermes/.env` + `~/.hermes/config.yaml`, and restarts the Hermes gateway.
-No manual Postgres/pgvector setup; no embedding API key needed because local
-bootstrap defaults to `SIQUEIRA_EMBEDDING_PROVIDER=mock`.
+The bootstrap script:
 
-Disable Hermes wiring when you only want the service:
+1. generates local `.env` secrets if needed;
+2. pulls `pgvector/pgvector:pg16` and `redis:7-alpine`;
+3. builds the app image;
+4. starts Postgres + Redis;
+5. runs Alembic migrations;
+6. starts API + worker;
+7. checks `/healthz` and `/readyz`;
+8. if Hermes is installed locally, installs Siqueira as the active `MemoryProvider`, updates `~/.hermes/.env` + `~/.hermes/config.yaml`, verifies discovery, and restarts the Hermes gateway when appropriate.
+
+Default local install uses `SIQUEIRA_EMBEDDING_PROVIDER=mock`, so no embedding API key is required just to bring the system up.
+
+Service-only install:
 
 ```bash
 SIQUEIRA_INSTALL_HERMES_PROVIDER=false ./scripts/bootstrap.sh
 ```
 
-See [`docs/INSTALL.md`](docs/INSTALL.md) for operator details.
+More operator detail: [`docs/INSTALL.md`](docs/INSTALL.md).
 
-## Manual Python install
+## Manual install
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate
 pip install -e '.[dev,postgres,queue,secrets,otel]'
 ```
 
-`postgres` pulls `asyncpg` + `pgvector`; `queue` pulls Redis + Dramatiq;
-`secrets` pulls `detect-secrets`; everything else is optional.
+Optional extras:
 
-## Configure
+| extra | adds |
+|---|---|
+| `postgres` | `asyncpg`, `pgvector` |
+| `queue` | Redis + Dramatiq dependencies |
+| `secrets` | `detect-secrets` redaction support |
+| `otel` | OpenTelemetry packages |
+| `dev` | pytest, ruff, mypy |
+
+## Configuration
 
 ```bash
 cp .env.example .env
-# Set at minimum:
-# SIQUEIRA_DATABASE_URL=postgresql+asyncpg://siqueira:siqueira@127.0.0.1:5432/siqueira_memo
-# SIQUEIRA_API_TOKEN=<random-bearer-token>
-# SIQUEIRA_EMBEDDING_PROVIDER=openai
-# SIQUEIRA_OPENAI_API_KEY=sk-...
 ```
 
-Every setting is documented in `.env.example`. Real secrets must not land
-in git.
+Common settings:
 
-## Database + migrations
+```dotenv
+SIQUEIRA_ENV=development
+SIQUEIRA_API_TOKEN=change-me
+SIQUEIRA_DATABASE_URL=postgresql+asyncpg://siqueira:password@127.0.0.1:5432/siqueira_memo
+SIQUEIRA_REDIS_URL=redis://127.0.0.1:6379/0
+SIQUEIRA_QUEUE_BACKEND=redis
+
+# Admin UI login
+SIQUEIRA_ADMIN_PASSWORD=change-me
+SIQUEIRA_ADMIN_SESSION_SECRET=change-me
+SIQUEIRA_ADMIN_COOKIE_SECURE=false
+
+# Capture behavior
+SIQUEIRA_MEMORY_CAPTURE_MODE=aggressive
+SIQUEIRA_MEMORY_CAPTURE_TARGET_RATIO=0.8
+SIQUEIRA_MEMORY_CAPTURE_SAVE_RAW_TURNS=true
+SIQUEIRA_MEMORY_CAPTURE_EXTRACT_STRUCTURED=true
+
+# Optional LLM classifier for automatic memory capture
+SIQUEIRA_MEMORY_CAPTURE_LLM_ENABLED=false
+SIQUEIRA_MEMORY_CAPTURE_LLM_BASE_URL=
+SIQUEIRA_MEMORY_CAPTURE_LLM_API_KEY=
+SIQUEIRA_MEMORY_CAPTURE_LLM_MODEL=gpt-5
+
+# Embeddings
+SIQUEIRA_EMBEDDING_PROVIDER=mock      # mock | openai | local
+SIQUEIRA_EMBEDDING_MODEL=text-embedding-3-large
+SIQUEIRA_EMBEDDING_DIMS=3072
+```
+
+Real secrets belong in `.env`, never in git.
+
+## Running locally
+
+Start infra and migrate:
 
 ```bash
 docker compose up -d postgres redis
 alembic upgrade head
 ```
 
-On Postgres the migration enables `vector` + `pg_trgm`, creates HNSW indexes
-on every `chunk_embeddings_*` table, GIN FTS indexes on `chunks`, and the
-partial-unique indexes on active canonical keys. On SQLite the migration
-creates tables only (used for local dev/tests).
+Run API:
 
-Reset for dev:
+```bash
+uvicorn siqueira_memo.main:app --host 127.0.0.1 --port 8787 --reload
+# or
+siqueira-memo
+```
+
+Run worker:
+
+```bash
+siqueira-memo-worker
+# or
+python -m siqueira_memo.workers.worker
+```
+
+Useful checks:
+
+```bash
+curl http://127.0.0.1:8787/healthz
+curl http://127.0.0.1:8787/readyz
+./scripts/smoke_compose.sh
+```
+
+Dev reset:
 
 ```bash
 python scripts/dev_reset_db.py
 ```
 
-## Run the API
+## API surface
 
-```bash
-uvicorn siqueira_memo.main:app --host 127.0.0.1 --port 8787 --reload
-# or
-siqueira-memo   # uses the console_script defined in pyproject.toml
-```
+All `POST` routes require `Authorization: Bearer $SIQUEIRA_API_TOKEN`, unless called from an authenticated admin browser session.
 
-Routes (all POSTs require `Authorization: Bearer $SIQUEIRA_API_TOKEN`):
+### Health
 
-| method | path                                | purpose                             |
-|--------|-------------------------------------|-------------------------------------|
-| GET    | `/healthz`                          | liveness                            |
-| GET    | `/readyz`                           | readiness + pgvector/redis status   |
-| POST   | `/v1/ingest/message`                | ingest a user/assistant turn        |
-| POST   | `/v1/ingest/tool-event`             | ingest a tool call + redacted output|
-| POST   | `/v1/ingest/artifact`               | register a file/artifact            |
-| POST   | `/v1/ingest/event`                  | raw event pass-through              |
-| POST   | `/v1/ingest/delegation`             | record subagent delegation          |
-| POST   | `/v1/ingest/hermes-compaction`      | record Hermes auxiliary summary     |
-| POST   | `/v1/ingest/builtin-memory-mirror`  | mirror Hermes built-in memory tool  |
-| POST   | `/v1/recall`                        | retrieve a context pack             |
-| POST   | `/v1/memory/remember`               | promote a fact/decision             |
-| POST   | `/v1/memory/correct`                | supersede/invalidate memory         |
-| POST   | `/v1/memory/forget`                 | soft/hard delete                    |
-| POST   | `/v1/memory/timeline`               | decisions + facts chronologically   |
-| POST   | `/v1/memory/sources`                | provenance resolver                 |
-| GET    | `/admin`                            | zero-build browser admin UI         |
-| POST   | `/v1/admin/projects`                | project overview counts             |
-| POST   | `/v1/admin/search`                  | admin search                        |
-| POST   | `/v1/admin/capture`                 | capture pipeline counters           |
-| POST   | `/v1/admin/detail`                  | detail + provenance payload         |
-| POST   | `/v1/admin/export`                  | Markdown export                     |
-| POST   | `/v1/admin/conflicts/scan`          | detect memory conflicts             |
-| POST   | `/v1/admin/conflicts/list`          | list unresolved conflicts           |
-| POST   | `/v1/admin/audit`                   | audit log viewer                    |
+| method | path | purpose |
+|---|---|---|
+| `GET` | `/healthz` | liveness |
+| `GET` | `/readyz` | readiness + Postgres/pgvector/Redis status |
 
-The `/admin` UI is a small light-themed HTML/CSS/vanilla-JS console with a
-mobile bottom nav, project overview, detail drawer, recall playground, correction
-flow, capture counters/global-memory view, conflict/audit panels, sources lookup,
-soft delete, and Markdown export. Set
-`SIQUEIRA_ADMIN_PASSWORD` and `SIQUEIRA_ADMIN_SESSION_SECRET` to enable the
-built-in form login with a signed `HttpOnly`/`SameSite=Lax` session cookie. API
-endpoints still accept Bearer tokens, and browser admin sessions can call the
-admin/recall/memory endpoints without exposing `SIQUEIRA_API_TOKEN` to JS. Keep
-`SIQUEIRA_ADMIN_COOKIE_SECURE=false` on plain HTTP tailnet URLs; flip it only
-behind HTTPS.
+### Ingest
 
-## Run the worker
+| method | path | purpose |
+|---|---|---|
+| `POST` | `/v1/ingest/message` | store a user/assistant message |
+| `POST` | `/v1/ingest/tool-event` | store tool input/output with redaction |
+| `POST` | `/v1/ingest/artifact` | register a file/artifact |
+| `POST` | `/v1/ingest/event` | generic raw event |
+| `POST` | `/v1/ingest/delegation` | record subagent delegation |
+| `POST` | `/v1/ingest/hermes-compaction` | record Hermes compaction summary |
+| `POST` | `/v1/ingest/builtin-memory-mirror` | mirror Hermes built-in memory writes |
 
-```bash
-python -m siqueira_memo.workers.worker
-```
+### Recall and memory management
 
-The default queue backend is in-memory, which is enough for local dev. Set
-`SIQUEIRA_QUEUE_BACKEND=redis` in production.
+| method | path | purpose |
+|---|---|---|
+| `POST` | `/v1/recall` | retrieve a context pack |
+| `POST` | `/v1/memory/remember` | promote a fact/decision |
+| `POST` | `/v1/memory/correct` | supersede or replace memory |
+| `POST` | `/v1/memory/forget` | soft/hard delete memory |
+| `POST` | `/v1/memory/timeline` | chronological facts + decisions |
+| `POST` | `/v1/memory/sources` | resolve provenance |
 
-## Enable the Hermes plugin
+### Admin
 
-Add to your Hermes config:
+| method | path | purpose |
+|---|---|---|
+| `GET` | `/admin` | browser dashboard |
+| `POST` | `/admin/login` | admin form login |
+| `POST` | `/admin/logout` | clear admin session |
+| `POST` | `/v1/admin/projects` | project/topic overview counts |
+| `POST` | `/v1/admin/search` | search memories/messages/summaries |
+| `POST` | `/v1/admin/capture` | capture counters and recent global memories |
+| `POST` | `/v1/admin/detail` | full item payload + provenance |
+| `POST` | `/v1/admin/export` | Markdown export |
+| `POST` | `/v1/admin/conflicts/scan` | detect conflicts |
+| `POST` | `/v1/admin/conflicts/list` | list conflicts |
+| `POST` | `/v1/admin/conflicts/resolve` | resolve conflict by supersession |
+| `POST` | `/v1/admin/audit` | deletion/audit log viewer |
+
+## Hermes plugin
+
+Enable in Hermes config:
 
 ```yaml
 memory:
   provider: siqueira-memo
 ```
 
-Make sure the `plugins/memory/siqueira-memo` directory is on the Hermes plugin
-path. The plugin entrypoint is `plugins/memory/siqueira-memo/__init__.py`
-which forwards to `SiqueiraMemoProvider` and exposes the following tools:
+The plugin shim lives in [`plugins/memory/siqueira-memo`](plugins/memory/siqueira-memo). The canonical assistant-facing policy is [`src/siqueira_memo/hermes_provider/system_prompt.md`](src/siqueira_memo/hermes_provider/system_prompt.md); startup checks hash parity with the plugin copy to prevent silent prompt drift.
 
-- `siqueira_memory_recall`
-- `siqueira_memory_remember`
-- `siqueira_memory_correct`
-- `siqueira_memory_forget`
-- `siqueira_memory_timeline`
-- `siqueira_memory_sources`
+See [`docs/HERMES_PLUGIN.md`](docs/HERMES_PLUGIN.md) for plugin-specific notes.
 
-See `plugins/memory/siqueira-memo/system_prompt.md` for the assistant-facing
-policy. The canonical prompt lives in
-`src/siqueira_memo/hermes_provider/system_prompt.md`; the plugin copy points at
-it. Plan §31.13 requires hash parity in production.
+## CLI helpers
 
-## Evals
-
-Deterministic golden suite:
+Installed console scripts:
 
 ```bash
-python -m siqueira_memo.evals.runner --min-pass-rate 0.8
+siqueira-memo
+siqueira-memo-worker
+siqueira-memo-evals
+siqueira-memo-import-hermes
+siqueira-memo-rebuild-embeddings
+siqueira-memo-export-markdown
 ```
 
-CI:
+Script wrappers are also available in [`scripts/`](scripts): bootstrap, provider install, smoke test, import, export, rebuild embeddings, and dev reset.
+
+## Testing and evals
 
 ```bash
 pytest -q
-pytest tests/evals -q       # deterministic
+pytest tests/evals -q
+siqueira-memo-evals --min-pass-rate 0.8
 ```
 
-Blocking CI (plan §26.2): unit tests + redaction corpus + deterministic
-retrieval evals + deletion cascade tests.
+The test suite covers redaction, chunking, embeddings, retrieval, promotion/correction/deletion, conflicts, admin routes, Hermes provider behavior, prompt hash parity, CLI entrypoints, and security regressions.
 
-## Imports (migration from Hermes SQLite / Hindsight)
+## Repository layout
 
-```bash
-# Hermes session transcripts (JSONL or SQLite SessionDB).
-python scripts/import_hermes_sessions.py path/to/export.jsonl --format jsonl
-python scripts/import_hermes_sessions.py path/to/session.sqlite --format sqlite
-
-# Hindsight offline import happens through siqueira_memo.services.hindsight_adapter,
-# e.g. via a Dramatiq worker job; it never runs as a live fallback.
-```
-
-## Layout
-
-```
+```text
 src/siqueira_memo/
-  api/              FastAPI routes and dependencies
-  evals/            golden question corpus + runner
-  hermes_provider/  MemoryProvider class + tool schemas + canonical system prompt
-  models/           SQLAlchemy models with Postgres/SQLite compatibility
+  api/              FastAPI routes and auth dependencies
+  cli/              import/export/rebuild CLI entrypoints
+  evals/            deterministic golden evals
+  hermes_provider/  MemoryProvider class, tool schemas, canonical prompt
+  models/           SQLAlchemy models for events, memory, chunks, retrieval, audit
   prompts/          versioned extraction/gate/verifier prompt artifacts
-  schemas/          Pydantic request/response + event payload schemas
-  services/         ingest, redaction, chunking, embedding, retrieval,
-                     extraction, conflict, deletion, retention, prompts,
-                     entity linking, session/hindsight import
-  utils/            canonical normalisation, tokenisers
-  workers/          queue abstraction, job handlers, worker entrypoint
+  schemas/          Pydantic request/response schemas
+  services/         ingest, redaction, chunking, embeddings, retrieval,
+                    extraction, conflicts, deletion, retention, export,
+                    scope/capture classifiers, imports
+  utils/            canonical normalization and token helpers
+  workers/          queue abstraction, Redis backend, job handlers, worker
 plugins/memory/siqueira-memo/
-                    Hermes plugin shim: __init__.py, plugin.yaml,
-                    system_prompt.md, README.md, cli.py
-alembic/           schema migrations
-scripts/           operational CLIs
-tests/
-  unit/            per-service unit tests
-  integration/     FastAPI end-to-end via httpx ASGI
-  evals/           deterministic golden + redaction corpus evals
-  fixtures/        redaction corpora
+                    Hermes plugin shim
+alembic/            migrations
+docs/               install/plugin/CI docs
+scripts/            operational scripts
+tests/              unit, integration, eval, fixture tests
 ```
 
-## Invariants (from the plan)
+## Invariants
 
 1. Raw archive is the source of truth; derived memory is rebuildable.
-2. Every fact/decision has `source_event_ids`.
-3. No secret ever reaches embeddings or LLM inputs.
+2. Every durable fact/decision should have source provenance.
+3. Secrets are redacted before embeddings or LLM classifier paths.
 4. User corrections supersede older memory.
 5. Hindsight is import-only; Siqueira is the live provider.
-6. Compact memory is a bootloader, not a substitute for Siqueira recall.
-7. Conflicts are surfaced, not flattened.
-8. Deletion removes derived chunks + embeddings and marks derived summaries.
+6. Compact memory is a bootloader, not the memory system.
+7. Conflicts are surfaced instead of silently flattened.
+8. Forget/delete paths remove derived chunks/embeddings and leave auditable state.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).
