@@ -45,6 +45,18 @@ _PROJECT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
             "gcap",
         ),
     ),
+    (
+        "infrastructure",
+        (
+            "tailscale",
+            "tailnet",
+            "таилскейл",
+            "tail4e3571",
+            "server inventory",
+            "linux-сервер",
+            "серверы",
+        ),
+    ),
     ("shannon", ("shannon",)),
     ("clawik-ai", ("clawik", "clawik.ai")),
     ("draftmotion-ai", ("draftmotion", "draftmotion.ai")),
@@ -65,9 +77,10 @@ _GLOBAL_MARKERS = (
 )
 
 _TOPIC_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("tailscale", ("tailscale", "tailnet", "таилскейл", "tail4e3571", ".ts.net")),
     ("memory-write-policy", ("memory policy", "сохраня", "памят", "remember")),
     ("admin-ui", ("dashboard", "admin", "ui", "login")),
-    ("deployment", ("deploy", "docker", "caddy", "tailscale", "container")),
+    ("deployment", ("deploy", "docker", "caddy", "container")),
     ("tax", ("tax", "receita", "irpf", "gcap")),
 )
 

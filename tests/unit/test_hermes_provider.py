@@ -196,6 +196,45 @@ async def test_sync_turn_promotes_useful_link_based_architecture_analysis(provid
 
 
 @pytest.mark.asyncio
+async def test_sync_turn_promotes_tailscale_server_inventory(provider):
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+
+    prov.sync_turn(
+        "Скинь мне список серверов с таилскейл",
+        "Вот Linux-серверы в твоём Tailscale: vmi3206734/hermes 100.98.80.48 online; personal 100.83.150.74 online; clawik 100.84.141.32 online; draft 100.74.70.18 online; DNS suffix tail4e3571.ts.net.",
+        session_id="s-tailscale-inventory",
+    )
+    drained = await queue.drain()
+    assert drained >= 3
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        messages = (
+            await session.execute(
+                select(Message)
+                .where(Message.session_id == "s-tailscale-inventory")
+                .order_by(Message.created_at.asc())
+            )
+        ).scalars().all()
+        assert [m.project for m in messages] == ["infrastructure", "infrastructure"]
+        assert [m.topic for m in messages] == ["tailscale", "tailscale"]
+
+        facts = (
+            await session.execute(
+                select(Fact)
+                .where(Fact.profile_id == prov._profile_id)  # noqa: SLF001
+                .where(Fact.statement.ilike("%tail4e3571.ts.net%"))
+            )
+        ).scalars().all()
+        assert facts
+        assert facts[0].project == "infrastructure"
+        assert facts[0].topic == "tailscale"
+
+
+@pytest.mark.asyncio
 async def test_queue_prefetch_warms_context_cache(provider):
     prov, _settings, queue = provider
     register_default_handlers(queue)

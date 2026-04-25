@@ -603,6 +603,15 @@ def _looks_useful_for_structured_memory(text: str) -> bool:
         "research layer",
         "source-backed",
         "conflict scan",
+        "tailscale",
+        "tailnet",
+        "таилскейл",
+        "tail4e3571",
+        ".ts.net",
+        "server inventory",
+        "linux-сервер",
+        "серверы",
+        "tailscale ip",
     )
     return len(text.strip()) >= 40 and any(marker in lowered for marker in markers)
 
