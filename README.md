@@ -103,12 +103,20 @@ Routes (all POSTs require `Authorization: Bearer $SIQUEIRA_API_TOKEN`):
 | POST   | `/v1/memory/timeline`               | decisions + facts chronologically   |
 | POST   | `/v1/memory/sources`                | provenance resolver                 |
 | GET    | `/admin`                            | zero-build browser admin UI         |
+| POST   | `/v1/admin/projects`                | project overview counts             |
 | POST   | `/v1/admin/search`                  | admin search                        |
+| POST   | `/v1/admin/detail`                  | detail + provenance payload         |
+| POST   | `/v1/admin/export`                  | Markdown export                     |
+| POST   | `/v1/admin/conflicts/scan`          | detect memory conflicts             |
+| POST   | `/v1/admin/conflicts/list`          | list unresolved conflicts           |
+| POST   | `/v1/admin/audit`                   | audit log viewer                    |
 
-The `/admin` UI is a small light-themed HTML/CSS/vanilla-JS console. It stores
-`SIQUEIRA_API_TOKEN` only in browser `localStorage` and calls the authenticated
-API endpoints with a Bearer token; keep the service bound to localhost unless you
-put real auth in front.
+The `/admin` UI is a small light-themed HTML/CSS/vanilla-JS console with a
+mobile bottom nav, project overview, detail drawer, recall playground, correction
+flow, conflict/audit panels, sources lookup, soft delete, and Markdown export. It
+stores `SIQUEIRA_API_TOKEN` only in browser `localStorage` and calls the
+authenticated API endpoints with a Bearer token; keep the service bound to
+localhost unless you put real auth in front.
 
 ## Run the worker
 

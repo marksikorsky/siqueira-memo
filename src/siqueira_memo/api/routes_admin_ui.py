@@ -17,319 +17,215 @@ _ADMIN_HTML = """<!doctype html>
     :root {
       --bg: #fbfaf8;
       --surface: #ffffff;
-      --surface-soft: #f4f2ee;
+      --surface-soft: #f3f1ed;
       --text: #22211f;
       --muted: #68635d;
-      --faint: #9c968f;
+      --faint: #9b958d;
       --line: rgba(34, 33, 31, 0.12);
       --accent: #1d6fd8;
-      --accent-dark: #1658ad;
-      --good: #168466;
-      --warn: #a65f00;
+      --accent-soft: #eef6ff;
+      --good: #16775f;
+      --warn: #a45f00;
       --danger: #b42318;
-      --shadow: rgba(0,0,0,0.04) 0 16px 42px, rgba(0,0,0,0.03) 0 4px 14px;
+      --shadow: rgba(0,0,0,0.035) 0 10px 30px, rgba(0,0,0,0.025) 0 2px 8px;
       --radius: 18px;
-      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
     }
     * { box-sizing: border-box; }
     html { background: var(--bg); color: var(--text); font-family: var(--sans); }
     body { margin: 0; min-height: 100vh; }
     button, input, select, textarea { font: inherit; }
     button { cursor: pointer; }
-    .shell { max-width: 1180px; margin: 0 auto; padding: 22px; }
-    .topbar { display: flex; gap: 16px; justify-content: space-between; align-items: center; margin-bottom: 22px; }
-    .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
-    .logo { width: 42px; height: 42px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); display: grid; place-items: center; font-weight: 760; letter-spacing: -0.04em; }
-    h1 { font-size: clamp(30px, 6vw, 56px); line-height: .96; letter-spacing: -0.055em; margin: 0; }
-    .subtitle { color: var(--muted); margin: 8px 0 0; max-width: 740px; line-height: 1.45; }
-    .badge { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; padding: 5px 9px; font-size: 12px; font-weight: 650; background: #eef6ff; color: var(--accent); border: 1px solid rgba(29,111,216,.13); white-space: nowrap; }
-    .grid { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 18px; align-items: start; }
+    .shell { max-width: 1220px; margin: 0 auto; padding: 16px 18px 32px; }
+    .topbar { display: flex; justify-content: space-between; gap: 14px; align-items: center; margin-bottom: 14px; }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .logo { width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); display: grid; place-items: center; box-shadow: var(--shadow); font-weight: 800; letter-spacing: -0.05em; }
+    h1 { margin: 0; font-size: clamp(26px, 5vw, 42px); line-height: .98; letter-spacing: -0.055em; }
+    .subtitle { margin: 3px 0 0; color: var(--muted); font-size: 14px; line-height: 1.35; }
+    .layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px; align-items: start; }
     .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
-    .card.pad { padding: 18px; }
-    .card-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 0 14px; }
-    h2 { font-size: 19px; line-height: 1.15; letter-spacing: -0.02em; margin: 0; }
-    label { display: block; color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; margin: 14px 0 7px; }
-    input, select, textarea { width: 100%; border: 1px solid var(--line); background: #fff; color: var(--text); border-radius: 12px; padding: 12px 12px; outline: none; min-height: 44px; }
-    textarea { min-height: 94px; resize: vertical; line-height: 1.4; }
+    .pad { padding: 14px; }
+    .sidebar { position: sticky; top: 14px; }
+    h2 { margin: 0; font-size: 18px; line-height: 1.15; letter-spacing: -0.02em; }
+    h3 { margin: 0; font-size: 15px; line-height: 1.25; }
+    label { display: block; margin: 12px 0 6px; color: var(--muted); font-size: 11px; font-weight: 760; letter-spacing: .05em; text-transform: uppercase; }
+    input, select, textarea { width: 100%; min-height: 42px; border: 1px solid var(--line); border-radius: 12px; background: #fff; color: var(--text); padding: 10px 11px; outline: none; }
+    textarea { min-height: 88px; resize: vertical; line-height: 1.42; }
     input:focus, select:focus, textarea:focus { border-color: rgba(29,111,216,.55); box-shadow: 0 0 0 4px rgba(29,111,216,.12); }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
-    .compact-actions { margin-top: 10px; }
-    .compact-actions .btn { min-height: 36px; padding: 8px 10px; font-size: 13px; }
-    .btn { border: 1px solid var(--line); border-radius: 12px; min-height: 42px; padding: 10px 13px; background: var(--surface); color: var(--text); font-weight: 680; }
+    .three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .btn { border: 1px solid var(--line); border-radius: 12px; min-height: 38px; padding: 9px 12px; background: var(--surface); color: var(--text); font-weight: 720; }
     .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-    .btn.primary:hover { background: var(--accent-dark); }
     .btn.danger { color: var(--danger); }
-    .btn:disabled { opacity: .55; cursor: not-allowed; }
-    .hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
-    .status { min-height: 22px; color: var(--muted); font-size: 13px; margin-top: 12px; }
-    .tabs { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--line); background: var(--surface-soft); overflow-x: auto; }
-    .tab { border: 1px solid transparent; background: transparent; color: var(--muted); border-radius: 999px; padding: 9px 12px; white-space: nowrap; font-weight: 700; }
-    .tab.active { background: var(--surface); color: var(--text); border-color: var(--line); box-shadow: rgba(0,0,0,.03) 0 2px 8px; }
-    .panel { display: none; padding: 18px; }
-    .panel.active { display: block; }
-    .results { display: grid; gap: 10px; }
-    .item { border: 1px solid var(--line); border-radius: 14px; padding: 13px; background: #fff; }
-    .item-head { display: flex; gap: 8px; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
-    .type { font: 700 11px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; color: var(--accent); background: #f1f7ff; border-radius: 999px; padding: 5px 7px; }
-    .meta { color: var(--faint); font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
-    .preview { white-space: pre-wrap; line-height: 1.45; overflow-wrap: anywhere; }
-    .empty { color: var(--muted); text-align: center; border: 1px dashed var(--line); border-radius: 16px; padding: 36px 18px; background: rgba(255,255,255,.62); }
-    .pillline { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+    .btn.ghost { background: transparent; }
+    .btn.small { min-height: 32px; padding: 7px 9px; font-size: 12px; }
+    .badge { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 4px 8px; font-size: 11px; font-weight: 760; background: var(--accent-soft); color: var(--accent); border: 1px solid rgba(29,111,216,.12); white-space: nowrap; }
+    .muted { color: var(--muted); }
     .small { font-size: 12px; color: var(--muted); }
     .mono { font-family: var(--mono); }
-    .split { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
-    .footer { color: var(--faint); font-size: 12px; text-align: center; padding: 24px 0 4px; }
+    .tabs { display: flex; gap: 7px; padding: 8px; background: var(--surface-soft); border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: thin; }
+    .tab { border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--muted); padding: 8px 11px; font-weight: 760; white-space: nowrap; }
+    .tab.active { background: #fff; color: var(--text); border-color: var(--line); box-shadow: rgba(0,0,0,.025) 0 2px 8px; }
+    .panel { display: none; padding: 14px; }
+    .panel.active { display: block; }
+    .overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .project-card, .item { border: 1px solid var(--line); border-radius: 15px; background: #fff; padding: 12px; }
+    .project-card { cursor: pointer; transition: transform .12s ease, border-color .12s ease; }
+    .project-card:hover { transform: translateY(-1px); border-color: rgba(29,111,216,.35); }
+    .statline { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+    .stat { border-radius: 999px; background: #f6f5f2; padding: 4px 7px; font-size: 11px; color: var(--muted); }
+    .results { display: grid; gap: 9px; margin-top: 12px; }
+    .item-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+    .preview { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.42; }
+    .meta { color: var(--faint); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+    .empty { color: var(--muted); text-align: center; border: 1px dashed var(--line); border-radius: 15px; padding: 28px 14px; background: rgba(255,255,255,.62); }
+    .status { min-height: 20px; margin-top: 9px; color: var(--muted); font-size: 12px; }
+    .top-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .drawer-backdrop { position: fixed; inset: 0; background: rgba(34,33,31,.18); display: none; z-index: 30; }
+    .drawer-backdrop.open { display: block; }
+    .drawer { position: fixed; right: 0; top: 0; height: 100vh; width: min(620px, 100%); background: var(--surface); border-left: 1px solid var(--line); box-shadow: rgba(0,0,0,.12) -18px 0 50px; z-index: 40; transform: translateX(105%); transition: transform .16s ease; overflow: auto; }
+    .drawer.open { transform: translateX(0); }
+    .drawer-header { position: sticky; top: 0; background: rgba(255,255,255,.96); border-bottom: 1px solid var(--line); padding: 12px 14px; display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .drawer-body { padding: 14px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f6f5f2; border: 1px solid var(--line); border-radius: 12px; padding: 10px; font-size: 12px; line-height: 1.45; }
+    .bottom-nav { display: none; }
     @media (max-width: 720px) {
-      .shell { padding: 14px; }
+      .shell { padding: 10px 10px calc(78px + env(safe-area-inset-bottom)); }
       .topbar { align-items: flex-start; }
-      .grid { grid-template-columns: 1fr; }
-      .row, .split { grid-template-columns: 1fr; }
-      .brand { align-items: flex-start; }
-      .logo { width: 38px; height: 38px; flex: 0 0 auto; }
-      .badge { display: none; }
-      .card.pad, .panel { padding: 14px; }
-      .tabs { padding: 8px; }
-      h1 { font-size: 38px; }
-      .btn { width: 100%; }
-      .actions { display: grid; grid-template-columns: 1fr; }
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { position: static; }
+      .row, .three, .overview { grid-template-columns: 1fr; }
+      .panel { padding: 12px; }
+      .tabs { display: none; }
+      .subtitle { display: none; }
+      .logo { width: 34px; height: 34px; }
+      .actions .btn { flex: 1 1 auto; }
+      .bottom-nav { display: grid; grid-template-columns: repeat(5, 1fr); position: fixed; left: 8px; right: 8px; bottom: calc(8px + env(safe-area-inset-bottom)); z-index: 20; background: rgba(255,255,255,.96); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 6px; gap: 4px; }
+      .bottom-nav button { border: 0; background: transparent; border-radius: 12px; min-height: 42px; font-size: 11px; font-weight: 800; color: var(--muted); }
+      .bottom-nav button.active { background: var(--accent-soft); color: var(--accent); }
+      .drawer { width: 100%; }
     }
   </style>
 </head>
 <body>
   <main class="shell">
     <header class="topbar">
-      <div class="brand">
-        <div class="logo">S</div>
-        <div>
-          <h1>Siqueira Memo</h1>
-          <p class="subtitle">Lightweight memory admin: search facts, inspect decisions, open provenance, and clean stale records. No build step, no npm zoo.</p>
-        </div>
-      </div>
-      <span class="badge">Local admin UI</span>
+      <div class="brand"><div class="logo">S</div><div><h1>Siqueira Memo</h1><p class="subtitle">Project overview, memory search, recall playground, corrections, conflicts, audit, and export.</p></div></div>
+      <div class="top-actions"><span class="badge">Light admin</span><button class="btn small" id="check-ready">Check ready</button></div>
     </header>
 
-    <section class="grid">
-      <aside class="card pad">
-        <div class="card-title"><h2>Connection</h2><span id="connection-badge" class="badge">Not checked</span></div>
+    <section class="layout">
+      <aside class="card pad sidebar">
+        <h2>Scope</h2>
         <label for="token">API token</label>
-        <input id="token" type="password" autocomplete="off" placeholder="Paste SIQUEIRA_API_TOKEN">
-        <p class="hint">Stored only in this browser via localStorage. The backend APIs still require Bearer auth.</p>
-        <div class="actions">
-          <button class="btn primary" id="save-token">Save token</button>
-          <button class="btn" id="check-ready">Check ready</button>
-        </div>
-        <div id="connection-status" class="status"></div>
-
+        <input id="token" type="password" autocomplete="off" placeholder="Optional behind public proxy">
         <label for="profile">Profile</label>
-        <input id="profile" placeholder="default" value="default">
-
-        <label for="project">Project filter</label>
-        <input id="project" placeholder="e.g. brazil-tax-crypto" value="siqueira-memo">
-        <div class="actions compact-actions">
-          <button class="btn" id="load-siqueira" type="button">Siqueira project</button>
-          <button class="btn" id="load-tax" type="button">Brazil tax</button>
+        <input id="profile" value="default">
+        <label for="project">Project</label>
+        <input id="project" value="siqueira-memo" placeholder="project id">
+        <div class="actions">
+          <button class="btn small" id="load-siqueira" type="button">Siqueira project</button>
+          <button class="btn small" id="load-tax" type="button">Brazil tax</button>
         </div>
-
-        <label for="topic">Topic filter</label>
+        <label for="topic">Topic</label>
         <input id="topic" placeholder="optional">
+        <div class="actions"><button class="btn primary" id="save-token">Save scope</button><button class="btn" id="refresh-all">Refresh</button></div>
+        <div id="connection-status" class="status"></div>
       </aside>
 
       <section class="card">
         <nav class="tabs" aria-label="Admin sections">
-          <button class="tab active" data-tab="search">Search</button>
-          <button class="tab" data-tab="timeline">Timeline</button>
-          <button class="tab" data-tab="remember">Remember</button>
-          <button class="tab" data-tab="sources">Sources</button>
+          <button class="tab active" data-tab="dashboard">Dashboard</button>
+          <button class="tab" data-tab="search">Search</button>
+          <button class="tab" data-tab="recall">Recall</button>
+          <button class="tab" data-tab="write">Write</button>
+          <button class="tab" data-tab="ops">Ops</button>
         </nav>
 
-        <section id="search" class="panel active">
-          <div class="card-title"><h2>Search memory</h2><span class="small">facts, decisions, messages, summaries</span></div>
-          <div class="row">
-            <div><label for="target-type">Type</label><select id="target-type"><option value="fact">Facts</option><option value="decision">Decisions</option><option value="message">Messages</option><option value="summary">Summaries</option></select></div>
-            <div><label for="status-filter">Status</label><select id="status-filter"><option value="">Any</option><option value="active">Active</option><option value="superseded">Superseded</option><option value="invalidated">Invalidated</option></select></div>
+        <section id="dashboard" class="panel active">
+          <div class="item-head"><div><h2>Project overview</h2><p class="small">Counts by project and topic. Tap a project to inspect it.</p></div><button class="btn small primary" id="load-projects">Reload</button></div>
+          <div id="projects-status" class="status"></div>
+          <div id="project-overview" class="overview"><div class="empty">Loading projects…</div></div>
+          <div class="row" style="margin-top:12px">
+            <div><h2>Timeline</h2><div id="timeline-status" class="status"></div><div id="timeline-results" class="results"><div class="empty">Timeline loads automatically.</div></div></div>
+            <div><h2>Recent search</h2><div id="search-status" class="status"></div><div id="search-results" class="results"><div class="empty">Search loads automatically.</div></div></div>
           </div>
-          <label for="query">Query</label>
-          <div class="split"><input id="query" placeholder="Search text"><button class="btn primary" id="run-search">Search</button></div>
-          <div id="search-status" class="status"></div>
-          <div id="search-results" class="results"><div class="empty">Run a search to inspect memory.</div></div>
         </section>
 
-        <section id="timeline" class="panel">
-          <div class="card-title"><h2>Timeline</h2><span class="small">chronological facts + decisions</span></div>
-          <div class="actions"><button class="btn primary" id="load-timeline">Load timeline</button></div>
-          <div id="timeline-status" class="status"></div>
-          <div id="timeline-results" class="results"><div class="empty">Load a project/topic timeline.</div></div>
+        <section id="search" class="panel">
+          <div class="item-head"><div><h2>Search</h2><p class="small">Facts, decisions, messages, summaries. Click any card for Detail drawer.</p></div></div>
+          <div class="row"><div><label for="target-type">Type</label><select id="target-type"><option value="fact">Facts</option><option value="decision">Decisions</option><option value="message">Messages</option><option value="summary">Summaries</option></select></div><div><label for="status-filter">Status</label><select id="status-filter"><option value="">Any</option><option value="active">Active</option><option value="superseded">Superseded</option><option value="invalidated">Invalidated</option></select></div></div>
+          <label for="query">Query</label><div class="row"><input id="query" placeholder="Search text"><button class="btn primary" id="run-search">Search</button></div>
         </section>
 
-        <section id="remember" class="panel">
-          <div class="card-title"><h2>Remember manually</h2><span class="small">promote a fact or decision</span></div>
-          <div class="row">
-            <div><label for="remember-kind">Kind</label><select id="remember-kind"><option value="fact">Fact</option><option value="decision">Decision</option></select></div>
-            <div><label for="remember-confidence">Confidence</label><input id="remember-confidence" type="number" min="0" max="1" step="0.05" value="0.9"></div>
-          </div>
-          <div id="fact-fields">
-            <label for="fact-subject">Subject</label><input id="fact-subject" placeholder="Mark / project / wallet">
-            <label for="fact-predicate">Predicate</label><input id="fact-predicate" placeholder="prefers / uses / cost basis">
-            <label for="fact-object">Object</label><input id="fact-object" placeholder="concise object value">
-          </div>
-          <div id="decision-fields" style="display:none">
-            <label for="decision-topic">Decision topic</label><input id="decision-topic" placeholder="architecture / tax / deployment">
-            <label for="decision-rationale">Rationale</label><input id="decision-rationale" placeholder="why this is the choice">
-          </div>
-          <label for="remember-statement">Statement</label><textarea id="remember-statement" placeholder="Write the durable memory exactly as it should be recalled."></textarea>
-          <div class="actions"><button class="btn primary" id="save-memory">Save memory</button></div>
-          <div id="remember-status" class="status"></div>
+        <section id="recall" class="panel">
+          <h2>Recall playground</h2><p class="small">Ask Siqueira like the agent does. Shows answer_context, facts, decisions, conflicts.</p>
+          <div class="row"><div><label for="recall-mode">Mode</label><select id="recall-mode"><option value="balanced">balanced</option><option value="deep">deep</option><option value="forensic">forensic</option></select></div><div><label for="recall-limit">Limit</label><input id="recall-limit" type="number" min="1" max="80" value="20"></div></div>
+          <label for="recall-query">Question</label><textarea id="recall-query" placeholder="What do we know about Siqueira Memo?"></textarea>
+          <div class="actions"><button class="btn primary" id="run-recall">Run recall</button></div>
+          <div id="recall-status" class="status"></div><div id="recall-results" class="results"><div class="empty">Run recall to inspect context packs.</div></div>
         </section>
 
-        <section id="sources" class="panel">
-          <div class="card-title"><h2>Sources & cleanup</h2><span class="small">inspect provenance or soft-delete a memory</span></div>
+        <section id="write" class="panel">
           <div class="row">
-            <div><label for="source-type">Type</label><select id="source-type"><option value="fact">Fact</option><option value="decision">Decision</option><option value="summary">Summary</option></select></div>
-            <div><label for="source-id">ID</label><input id="source-id" class="mono" placeholder="uuid"></div>
+            <div><h2>Remember</h2><div class="row"><div><label for="remember-kind">Kind</label><select id="remember-kind"><option value="fact">Fact</option><option value="decision">Decision</option></select></div><div><label for="remember-confidence">Confidence</label><input id="remember-confidence" type="number" min="0" max="1" step="0.05" value="0.9"></div></div><div id="fact-fields"><label for="fact-subject">Subject</label><input id="fact-subject"><label for="fact-predicate">Predicate</label><input id="fact-predicate"><label for="fact-object">Object</label><input id="fact-object"></div><div id="decision-fields" style="display:none"><label for="decision-topic">Decision topic</label><input id="decision-topic"><label for="decision-rationale">Rationale</label><input id="decision-rationale"></div><label for="remember-statement">Statement</label><textarea id="remember-statement"></textarea><button class="btn primary" id="save-memory">Save memory</button><div id="remember-status" class="status"></div></div>
+            <div><h2>Correct</h2><p class="small">Detail drawer can prefill this. Use replacement to supersede old memory.</p><label for="correct-type">Type</label><select id="correct-type"><option value="fact">Fact</option><option value="decision">Decision</option></select><label for="correct-id">Target ID</label><input id="correct-id" class="mono"><label for="correction-text">Correction text</label><textarea id="correction-text"></textarea><label for="replacement-statement">Replacement statement</label><textarea id="replacement-statement"></textarea><button class="btn primary" id="submit-correction">Submit correction</button><div id="correct-status" class="status"></div></div>
           </div>
-          <div class="actions"><button class="btn primary" id="load-sources">Load sources</button><button class="btn danger" id="soft-delete">Soft delete</button></div>
-          <div id="sources-status" class="status"></div>
-          <div id="sources-results" class="results"><div class="empty">Paste an ID from search/timeline.</div></div>
+        </section>
+
+        <section id="ops" class="panel">
+          <div class="three">
+            <div><h2>Conflicts</h2><div class="actions"><button class="btn primary" id="scan-conflicts">Scan</button><button class="btn" id="list-conflicts">List</button></div><div id="conflicts-status" class="status"></div><div id="conflicts-results" class="results"></div></div>
+            <div><h2>Audit</h2><button class="btn primary" id="load-audit">Load audit</button><div id="audit-status" class="status"></div><div id="audit-results" class="results"></div></div>
+            <div><h2>Export Markdown</h2><p class="small">Download current project/topic facts and decisions.</p><button class="btn primary" id="export-markdown">Export Markdown</button><div id="export-status" class="status"></div><h2 style="margin-top:18px">Sources</h2><label for="source-type">Type</label><select id="source-type"><option value="fact">Fact</option><option value="decision">Decision</option><option value="summary">Summary</option></select><label for="source-id">ID</label><input id="source-id" class="mono"><div class="actions"><button class="btn" id="load-sources">Load</button><button class="btn danger" id="soft-delete">Soft delete</button></div><div id="sources-status" class="status"></div><div id="sources-results" class="results"></div></div>
+          </div>
         </section>
       </section>
     </section>
-    <div class="footer">Designed for localhost use. Keep the token private; do not expose this service publicly without real auth in front.</div>
   </main>
+
+  <div id="drawer-backdrop" class="drawer-backdrop"></div>
+  <aside id="detail-drawer" class="drawer" aria-label="Detail drawer"><div class="drawer-header"><div><h2>Detail drawer</h2><div id="drawer-subtitle" class="small"></div></div><button class="btn small" id="close-drawer">Close</button></div><div id="drawer-body" class="drawer-body"><div class="empty">Select a memory card.</div></div></aside>
+  <nav class="bottom-nav"><button class="active" data-tab="dashboard">Home</button><button data-tab="search">Search</button><button data-tab="recall">Recall</button><button data-tab="write">Write</button><button data-tab="ops">Ops</button></nav>
 
   <script>
     const $ = (id) => document.getElementById(id);
     const params = new URLSearchParams(window.location.search);
-    const state = {
-      token: localStorage.getItem('siqueira.apiToken') || '',
-      profile: params.get('profile') || localStorage.getItem('siqueira.profile') || 'default',
-      project: params.get('project') || localStorage.getItem('siqueira.project') || 'siqueira-memo'
-    };
-    $('token').value = state.token;
-    $('profile').value = state.profile;
-    $('project').value = state.project;
-
-    function authHeaders() {
-      const token = $('token').value.trim();
-      const profile = $('profile').value.trim() || 'default';
-      const headers = { 'Content-Type': 'application/json', 'X-Profile-Id': profile };
-      if (token) headers.Authorization = 'Bearer ' + token;
-      return headers;
-    }
-    function filters() {
-      return { profile_id: $('profile').value.trim() || 'default', project: $('project').value.trim() || null, topic: $('topic').value.trim() || null };
-    }
-    function setStatus(id, text, tone='muted') {
-      const el = $(id); el.textContent = text || ''; el.style.color = tone === 'danger' ? 'var(--danger)' : tone === 'good' ? 'var(--good)' : 'var(--muted)';
-    }
-    function escapeHtml(value) {
-      return String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
-    }
-    async function post(path, body) {
-      const res = await fetch(path, { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
-      const text = await res.text();
-      let data; try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: text }; }
-      if (!res.ok) throw new Error(data.detail || res.statusText || 'Request failed');
-      return data;
-    }
-    function renderHits(target, hits) {
-      if (!hits.length) { $(target).innerHTML = '<div class="empty">Nothing found.</div>'; return; }
-      $(target).innerHTML = hits.map((hit) => `
-        <article class="item">
-          <div class="item-head"><span class="type">${escapeHtml(hit.target_type || hit.kind)}</span><span class="meta mono">${escapeHtml(hit.id)}</span></div>
-          <div class="preview">${escapeHtml(hit.preview || hit.statement || hit.decision || hit.title || '')}</div>
-          <div class="pillline">
-            ${hit.project ? `<span class="badge">${escapeHtml(hit.project)}</span>` : ''}
-            ${hit.topic ? `<span class="badge">${escapeHtml(hit.topic)}</span>` : ''}
-            ${hit.status ? `<span class="badge">${escapeHtml(hit.status)}</span>` : ''}
-          </div>
-          <div class="meta">${escapeHtml(hit.created_at || hit.decided_at || '')}</div>
-        </article>`).join('');
-    }
-
-    document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab,.panel').forEach((el) => el.classList.remove('active'));
-      tab.classList.add('active'); $(tab.dataset.tab).classList.add('active');
-    }));
-
-    $('save-token').onclick = () => {
-      localStorage.setItem('siqueira.apiToken', $('token').value.trim());
-      localStorage.setItem('siqueira.profile', $('profile').value.trim() || 'default');
-      localStorage.setItem('siqueira.project', $('project').value.trim() || '');
-      setStatus('connection-status', 'Saved locally.', 'good');
-    };
-    $('check-ready').onclick = async () => {
-      try {
-        const res = await fetch('/readyz');
-        const body = await res.json();
-        $('connection-badge').textContent = body.ok ? 'Ready' : 'Not ready';
-        setStatus('connection-status', body.ok ? 'API ready. Database reachable.' : 'API responded but is not ready.', body.ok ? 'good' : 'danger');
-      } catch (err) { setStatus('connection-status', err.message, 'danger'); }
-    };
-    async function runSearch() {
-      setStatus('search-status', 'Searching…');
-      try {
-        const body = await post('/v1/admin/search', { ...filters(), query: $('query').value.trim() || null, target_type: $('target-type').value, status: $('status-filter').value || null, limit: 50 });
-        setStatus('search-status', `${body.total} result(s) for ${$('project').value.trim() || 'all projects'}.`, 'good');
-        renderHits('search-results', body.hits || []);
-      } catch (err) { setStatus('search-status', err.message, 'danger'); }
-    }
-    async function loadTimeline() {
-      setStatus('timeline-status', 'Loading…');
-      try {
-        const body = await post('/v1/memory/timeline', { ...filters(), limit: 50 });
-        setStatus('timeline-status', `${body.entries.length} timeline item(s) for ${$('project').value.trim() || 'all projects'}.`, 'good');
-        renderHits('timeline-results', (body.entries || []).map(e => ({...e, target_type: e.kind, preview: e.preview})));
-      } catch (err) { setStatus('timeline-status', err.message, 'danger'); }
-    }
-    function loadDefaultProject(project) {
-      $('project').value = project;
-      $('topic').value = '';
-      $('query').value = '';
-      $('target-type').value = 'fact';
-      localStorage.setItem('siqueira.project', project);
-      runSearch();
-      loadTimeline();
-    }
-    $('run-search').onclick = runSearch;
-    $('load-timeline').onclick = loadTimeline;
-    $('load-siqueira').onclick = () => loadDefaultProject('siqueira-memo');
-    $('load-tax').onclick = () => loadDefaultProject('brazil-tax-crypto');
-    $('remember-kind').onchange = () => {
-      const isFact = $('remember-kind').value === 'fact';
-      $('fact-fields').style.display = isFact ? '' : 'none';
-      $('decision-fields').style.display = isFact ? 'none' : '';
-    };
-    $('save-memory').onclick = async () => {
-      setStatus('remember-status', 'Saving…');
-      try {
-        const kind = $('remember-kind').value;
-        const payload = { ...filters(), kind, statement: $('remember-statement').value.trim(), confidence: Number($('remember-confidence').value || 0.9) };
-        if (kind === 'fact') Object.assign(payload, { subject: $('fact-subject').value.trim(), predicate: $('fact-predicate').value.trim(), object: $('fact-object').value.trim() });
-        else Object.assign(payload, { topic: $('decision-topic').value.trim() || $('topic').value.trim() || 'manual', rationale: $('decision-rationale').value.trim() });
-        const body = await post('/v1/memory/remember', payload);
-        setStatus('remember-status', `Saved ${body.kind}: ${body.id}`, 'good');
-      } catch (err) { setStatus('remember-status', err.message, 'danger'); }
-    };
-    $('load-sources').onclick = async () => {
-      setStatus('sources-status', 'Loading…');
-      try {
-        const body = await post('/v1/memory/sources', { profile_id: $('profile').value.trim() || 'default', target_type: $('source-type').value, target_id: $('source-id').value.trim() });
-        setStatus('sources-status', `${body.sources.length} source(s).`, 'good');
-        $('sources-results').innerHTML = body.sources.length ? body.sources.map(s => `<article class="item"><div class="preview mono">${escapeHtml(JSON.stringify(s, null, 2))}</div></article>`).join('') : '<div class="empty">No sources found.</div>';
-      } catch (err) { setStatus('sources-status', err.message, 'danger'); }
-    };
-    $('soft-delete').onclick = async () => {
-      if (!confirm('Soft-delete this memory?')) return;
-      setStatus('sources-status', 'Deleting…');
-      try {
-        const body = await post('/v1/memory/forget', { profile_id: $('profile').value.trim() || 'default', target_type: $('source-type').value, target_id: $('source-id').value.trim(), mode: 'soft', reason: 'admin-ui' });
-        setStatus('sources-status', `Soft-deleted. Event ${body.event_id}`, 'good');
-      } catch (err) { setStatus('sources-status', err.message, 'danger'); }
-    };
-    $('query').addEventListener('keydown', (event) => { if (event.key === 'Enter') runSearch(); });
-    window.addEventListener('load', () => loadDefaultProject($('project').value.trim() || 'siqueira-memo'));
+    const state = { token: localStorage.getItem('siqueira.apiToken') || '', profile: params.get('profile') || localStorage.getItem('siqueira.profile') || 'default', project: params.get('project') || localStorage.getItem('siqueira.project') || 'siqueira-memo' };
+    $('token').value = state.token; $('profile').value = state.profile; $('project').value = state.project;
+    const escapeHtml = (v) => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+    const setStatus = (id, text, tone='muted') => { const el=$(id); if (!el) return; el.textContent=text||''; el.style.color = tone === 'danger' ? 'var(--danger)' : tone === 'good' ? 'var(--good)' : 'var(--muted)'; };
+    function authHeaders() { const headers = { 'Content-Type': 'application/json', 'X-Profile-Id': $('profile').value.trim() || 'default' }; const token = $('token').value.trim(); if (token) headers.Authorization = 'Bearer ' + token; return headers; }
+    function filters() { return { profile_id: $('profile').value.trim() || 'default', project: $('project').value.trim() || null, topic: $('topic').value.trim() || null }; }
+    async function post(path, body) { const res = await fetch(path, { method:'POST', headers:authHeaders(), body:JSON.stringify(body || {}) }); const text = await res.text(); let data; try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: text }; } if (!res.ok) throw new Error(data.detail || res.statusText || 'Request failed'); return data; }
+    function activateTab(name) { document.querySelectorAll('.tab,.panel,.bottom-nav button').forEach(el => el.classList.remove('active')); document.querySelectorAll(`[data-tab="${name}"]`).forEach(el => el.classList.add('active')); $(name).classList.add('active'); }
+    document.querySelectorAll('[data-tab]').forEach(tab => tab.addEventListener('click', () => activateTab(tab.dataset.tab)));
+    function cardHtml(hit) { const type = hit.target_type || hit.kind; const title = hit.topic || hit.project || type; return `<article class="item" data-type="${escapeHtml(type)}" data-id="${escapeHtml(hit.id)}"><div class="item-head"><div><span class="badge">${escapeHtml(type)}</span> <strong>${escapeHtml(title)}</strong></div><span class="meta mono">${escapeHtml(hit.id)}</span></div><div class="preview">${escapeHtml(hit.preview || hit.statement || hit.decision || hit.title || '')}</div><div class="statline">${hit.project ? `<span class="stat">${escapeHtml(hit.project)}</span>` : ''}${hit.topic ? `<span class="stat">${escapeHtml(hit.topic)}</span>` : ''}${hit.status ? `<span class="stat">${escapeHtml(hit.status)}</span>` : ''}</div></article>`; }
+    function bindDetailClicks(rootId) { $(rootId).querySelectorAll('.item[data-id]').forEach(el => el.addEventListener('click', () => openDetail(el.dataset.type, el.dataset.id))); }
+    function renderHits(target, hits) { $(target).innerHTML = hits.length ? hits.map(cardHtml).join('') : '<div class="empty">Nothing found.</div>'; bindDetailClicks(target); }
+    async function loadProjects() { setStatus('projects-status','Loading…'); try { const body = await post('/v1/admin/projects', { profile_id: $('profile').value.trim() || 'default' }); setStatus('projects-status', `${body.projects.length} project(s).`, 'good'); $('project-overview').innerHTML = body.projects.length ? body.projects.map(p => `<article class="project-card" data-project="${escapeHtml(p.project)}"><div class="item-head"><h3>${escapeHtml(p.project)}</h3><span class="badge">${p.total}</span></div><div class="statline"><span class="stat">${p.facts} facts</span><span class="stat">${p.decisions} decisions</span><span class="stat">${p.messages} messages</span><span class="stat">${p.summaries} summaries</span></div><div class="small" style="margin-top:8px">${(p.topics||[]).slice(0,4).map(t => escapeHtml(t.topic)).join(' · ') || 'No topics yet'}</div></article>`).join('') : '<div class="empty">No projects yet.</div>'; document.querySelectorAll('.project-card').forEach(el => el.addEventListener('click', () => loadDefaultProject(el.dataset.project))); } catch (err) { setStatus('projects-status', err.message, 'danger'); } }
+    async function runSearch() { setStatus('search-status','Searching…'); try { const body = await post('/v1/admin/search', { ...filters(), query: $('query').value.trim() || null, target_type: $('target-type').value, status: $('status-filter').value || null, limit: 50 }); setStatus('search-status', `${body.total} result(s) for ${$('project').value.trim() || 'all projects'}.`, 'good'); renderHits('search-results', body.hits || []); } catch (err) { setStatus('search-status', err.message, 'danger'); } }
+    async function loadTimeline() { setStatus('timeline-status','Loading…'); try { const body = await post('/v1/memory/timeline', { ...filters(), limit: 50 }); setStatus('timeline-status', `${body.entries.length} timeline item(s).`, 'good'); renderHits('timeline-results', (body.entries||[]).map(e => ({ ...e, target_type:e.kind, preview:e.preview }))); } catch (err) { setStatus('timeline-status', err.message, 'danger'); } }
+    function loadDefaultProject(project) { $('project').value = project; $('topic').value = ''; $('query').value = ''; $('target-type').value = 'fact'; localStorage.setItem('siqueira.project', project); runSearch(); loadTimeline(); }
+    async function openDetail(type, id) { $('detail-drawer').classList.add('open'); $('drawer-backdrop').classList.add('open'); $('drawer-subtitle').textContent = `${type} ${id}`; $('drawer-body').innerHTML = '<div class="empty">Loading detail…</div>'; $('source-type').value = type === 'decision' ? 'decision' : 'fact'; $('source-id').value = id; $('correct-type').value = type === 'decision' ? 'decision' : 'fact'; $('correct-id').value = id; try { const body = await post('/v1/admin/detail', { target_type:type, target_id:id, profile_id:$('profile').value.trim() || 'default' }); const item = body.item || {}; $('drawer-body').innerHTML = `<h2>${escapeHtml(item.topic || item.subject || item.target_type)}</h2><pre>${escapeHtml(JSON.stringify(item, null, 2))}</pre><h2>Sources</h2><pre>${escapeHtml(JSON.stringify(body.sources || [], null, 2))}</pre><div class="actions"><button class="btn primary" id="prefill-correction">Correct this</button><button class="btn danger" id="drawer-soft-delete">Soft delete</button></div>`; $('prefill-correction').onclick = () => { activateTab('write'); $('correction-text').focus(); }; $('drawer-soft-delete').onclick = () => softDelete(type, id); } catch (err) { $('drawer-body').innerHTML = `<div class="empty">${escapeHtml(err.message)}</div>`; } }
+    function closeDrawer() { $('detail-drawer').classList.remove('open'); $('drawer-backdrop').classList.remove('open'); }
+    async function runRecall() { setStatus('recall-status','Recalling…'); try { const body = await post('/v1/recall', { ...filters(), query:$('recall-query').value.trim() || `What do we know about ${$('project').value.trim() || 'this project'}?`, mode:$('recall-mode').value, limit:Number($('recall-limit').value || 20) }); const pack = body.context_pack || {}; setStatus('recall-status', `Returned ${(pack.facts||[]).length} facts and ${(pack.decisions||[]).length} decisions.`, 'good'); $('recall-results').innerHTML = `<article class="item"><h3>Answer context</h3><div class="preview">${escapeHtml(pack.answer_context || '')}</div></article><article class="item"><h3>Raw pack</h3><pre>${escapeHtml(JSON.stringify(pack, null, 2))}</pre></article>`; } catch (err) { setStatus('recall-status', err.message, 'danger'); } }
+    async function saveMemory() { setStatus('remember-status','Saving…'); try { const kind = $('remember-kind').value; const payload = { ...filters(), kind, statement:$('remember-statement').value.trim(), confidence:Number($('remember-confidence').value || 0.9) }; if (kind === 'fact') Object.assign(payload, { subject:$('fact-subject').value.trim(), predicate:$('fact-predicate').value.trim(), object:$('fact-object').value.trim() }); else Object.assign(payload, { topic:$('decision-topic').value.trim() || $('topic').value.trim() || 'manual', rationale:$('decision-rationale').value.trim() }); const body = await post('/v1/memory/remember', payload); setStatus('remember-status', `Saved ${body.kind}: ${body.id}`, 'good'); loadProjects(); runSearch(); } catch (err) { setStatus('remember-status', err.message, 'danger'); } }
+    async function submitCorrection() { setStatus('correct-status','Correcting…'); try { const targetType = $('correct-type').value; const replacement = { kind: targetType, statement:$('replacement-statement').value.trim(), project:$('project').value.trim() || null, topic:$('topic').value.trim() || 'manual' }; if (targetType === 'fact') Object.assign(replacement, { subject:'corrected memory', predicate:'states', object:$('replacement-statement').value.trim() }); const body = await post('/v1/memory/correct', { target_type:targetType, target_id:$('correct-id').value.trim(), correction_text:$('correction-text').value.trim(), replacement }); setStatus('correct-status', `Corrected. Replacement: ${body.replacement_id || 'none'}`, 'good'); runSearch(); } catch (err) { setStatus('correct-status', err.message, 'danger'); } }
+    async function loadSources() { setStatus('sources-status','Loading…'); try { const body = await post('/v1/memory/sources', { profile_id:$('profile').value.trim() || 'default', target_type:$('source-type').value, target_id:$('source-id').value.trim() }); setStatus('sources-status', `${body.sources.length} source(s).`, 'good'); $('sources-results').innerHTML = body.sources.length ? body.sources.map(s => `<article class="item"><pre>${escapeHtml(JSON.stringify(s, null, 2))}</pre></article>`).join('') : '<div class="empty">No sources.</div>'; } catch (err) { setStatus('sources-status', err.message, 'danger'); } }
+    async function softDelete(type, id) { if (!confirm('Soft-delete this memory?')) return; setStatus('sources-status','Deleting…'); try { const body = await post('/v1/memory/forget', { target_type:type || $('source-type').value, target_id:id || $('source-id').value.trim(), mode:'soft', reason:'admin-ui' }); setStatus('sources-status', `Soft-deleted. Event ${body.event_id}`, 'good'); closeDrawer(); runSearch(); loadTimeline(); } catch (err) { setStatus('sources-status', err.message, 'danger'); } }
+    async function loadConflicts(path) { setStatus('conflicts-status','Loading…'); try { const body = await post(path, {}); setStatus('conflicts-status', `${body.detected} conflict(s).`, 'good'); $('conflicts-results').innerHTML = (body.conflicts||[]).length ? body.conflicts.map(c => `<article class="item"><pre>${escapeHtml(JSON.stringify(c, null, 2))}</pre></article>`).join('') : '<div class="empty">No conflicts.</div>'; } catch (err) { setStatus('conflicts-status', err.message, 'danger'); } }
+    async function loadAudit() { setStatus('audit-status','Loading…'); try { const body = await post('/v1/admin/audit', { profile_id:$('profile').value.trim() || 'default', limit:50 }); setStatus('audit-status', `${body.entries.length} audit event(s).`, 'good'); $('audit-results').innerHTML = body.entries.length ? body.entries.map(e => `<article class="item"><pre>${escapeHtml(JSON.stringify(e, null, 2))}</pre></article>`).join('') : '<div class="empty">No audit events.</div>'; } catch (err) { setStatus('audit-status', err.message, 'danger'); } }
+    async function exportMarkdown() { setStatus('export-status','Exporting…'); try { const res = await fetch('/v1/admin/export', { method:'POST', headers:authHeaders(), body:JSON.stringify({ ...filters(), format:'markdown' }) }); if (!res.ok) throw new Error(await res.text()); const blob = await res.blob(); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `siqueira-${$('project').value.trim() || 'memory'}.md`; a.click(); URL.revokeObjectURL(url); setStatus('export-status','Downloaded markdown.', 'good'); } catch (err) { setStatus('export-status', err.message, 'danger'); } }
+    async function refreshAll() { await loadProjects(); await runSearch(); await loadTimeline(); }
+    $('save-token').onclick = () => { localStorage.setItem('siqueira.apiToken', $('token').value.trim()); localStorage.setItem('siqueira.profile', $('profile').value.trim() || 'default'); localStorage.setItem('siqueira.project', $('project').value.trim() || ''); setStatus('connection-status','Saved locally.','good'); };
+    $('check-ready').onclick = async () => { try { const res = await fetch('/readyz'); const body = await res.json(); setStatus('connection-status', body.ok ? 'API ready. Database reachable.' : 'API responded but is not ready.', body.ok ? 'good' : 'danger'); } catch (err) { setStatus('connection-status', err.message, 'danger'); } };
+    $('refresh-all').onclick = refreshAll; $('load-projects').onclick = loadProjects; $('run-search').onclick = runSearch; $('load-siqueira').onclick = () => loadDefaultProject('siqueira-memo'); $('load-tax').onclick = () => loadDefaultProject('brazil-tax-crypto'); $('run-recall').onclick = runRecall; $('save-memory').onclick = saveMemory; $('submit-correction').onclick = submitCorrection; $('load-sources').onclick = loadSources; $('soft-delete').onclick = () => softDelete(); $('scan-conflicts').onclick = () => loadConflicts('/v1/admin/conflicts/scan'); $('list-conflicts').onclick = () => loadConflicts('/v1/admin/conflicts/list'); $('load-audit').onclick = loadAudit; $('export-markdown').onclick = exportMarkdown; $('close-drawer').onclick = closeDrawer; $('drawer-backdrop').onclick = closeDrawer;
+    $('remember-kind').onchange = () => { const fact = $('remember-kind').value === 'fact'; $('fact-fields').style.display = fact ? '' : 'none'; $('decision-fields').style.display = fact ? 'none' : ''; };
+    $('query').addEventListener('keydown', e => { if (e.key === 'Enter') runSearch(); });
+    window.addEventListener('load', refreshAll);
   </script>
 </body>
 </html>

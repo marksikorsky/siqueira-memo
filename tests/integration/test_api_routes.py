@@ -89,10 +89,89 @@ async def test_admin_ui_is_lightweight_mobile_friendly_and_unauthenticated(api_c
     assert 'value="siqueira-memo"' in html
     assert "Siqueira project" in html
     assert "loadDefaultProject" in html
+    assert "Project overview" in html
+    assert "Detail drawer" in html
+    assert "Recall playground" in html
+    assert "Conflicts" in html
+    assert "Audit" in html
+    assert "Export Markdown" in html
+    assert "bottom-nav" in html
+    assert "safe-area-inset-bottom" in html
+    assert "/v1/admin/projects" in html
+    assert "/v1/admin/detail" in html
+    assert "/v1/admin/export" in html
+    assert "/v1/recall" in html
+    assert "/v1/admin/conflicts/scan" in html
+    assert "/v1/admin/audit" in html
     assert "/v1/admin/search" in html
     assert "/v1/memory/timeline" in html
     assert "/v1/memory/sources" in html
     assert "--bg: #fbfaf8" in html
+
+
+@pytest.mark.asyncio
+async def test_admin_projects_detail_and_export(api_client):
+    client, settings = api_client
+    auth = _auth(settings)
+    fact = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "fact",
+            "subject": "Siqueira UI",
+            "predicate": "has",
+            "object": "project overview",
+            "statement": "Siqueira UI has a project overview dashboard.",
+            "project": "siqueira-memo",
+            "topic": "admin-ui",
+        },
+    )
+    assert fact.status_code == 200, fact.text
+    fact_id = fact.json()["id"]
+    decision = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "decision",
+            "statement": "Use a zero-build mobile admin UI for Siqueira.",
+            "topic": "admin-ui",
+            "project": "siqueira-memo",
+            "rationale": "Small internal tool; npm would be needless overhead.",
+        },
+    )
+    assert decision.status_code == 200, decision.text
+
+    projects = await client.post(
+        "/v1/admin/projects",
+        headers=auth,
+        json={"profile_id": "default"},
+    )
+    assert projects.status_code == 200, projects.text
+    siqueira = next(p for p in projects.json()["projects"] if p["project"] == "siqueira-memo")
+    assert siqueira["facts"] >= 1
+    assert siqueira["decisions"] >= 1
+    assert any(t["topic"] == "admin-ui" for t in siqueira["topics"])
+
+    detail = await client.post(
+        "/v1/admin/detail",
+        headers=auth,
+        json={"target_type": "fact", "target_id": fact_id},
+    )
+    assert detail.status_code == 200, detail.text
+    detail_body = detail.json()
+    assert detail_body["item"]["id"] == fact_id
+    assert detail_body["item"]["statement"] == "Siqueira UI has a project overview dashboard."
+    assert detail_body["sources"]
+
+    export = await client.post(
+        "/v1/admin/export",
+        headers=auth,
+        json={"project": "siqueira-memo", "format": "markdown"},
+    )
+    assert export.status_code == 200, export.text
+    assert export.headers["content-type"].startswith("text/markdown")
+    assert "# Siqueira Memo Memory Export" in export.text
+    assert "Siqueira UI has a project overview dashboard." in export.text
 
 
 @pytest.mark.asyncio
