@@ -119,6 +119,23 @@ The dashboard includes:
 
 Admin auth is optional but built in: set `SIQUEIRA_ADMIN_PASSWORD` and `SIQUEIRA_ADMIN_SESSION_SECRET` to enable form login with a signed `HttpOnly` / `SameSite=Lax` session cookie. API clients can still use bearer tokens.
 
+![Siqueira Memo admin dashboard](docs/assets/siqueira-admin-dashboard.jpg)
+
+### Recommended secure setup
+
+If you are installing this on a real server, ask Hermes to configure it end-to-end instead of hand-editing secrets and ports yourself:
+
+```text
+Install and configure Siqueira Memo for Hermes.
+Generate a strong admin password and session secret.
+Set SIQUEIRA_ADMIN_PASSWORD and SIQUEIRA_ADMIN_SESSION_SECRET in .env.
+Enable the siqueira-memo MemoryProvider in Hermes.
+Restart the services and verify /readyz and /admin/login.
+Expose the admin UI only through Tailscale/tailnet access, not the public internet.
+```
+
+Security recommendation: keep the API, admin UI, Postgres, and Redis off the public internet. The sane default is localhost-only containers plus a private Tailscale URL/IP for `/admin`. If you absolutely must expose it publicly, use TLS, strong auth, and a reverse proxy — but for an agent memory database, public exposure is usually the wrong tradeoff.
+
 ## Architecture
 
 ```text
