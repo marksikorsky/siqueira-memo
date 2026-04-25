@@ -12,7 +12,7 @@ from siqueira_memo.config import settings_for_tests
 from siqueira_memo.db import create_all_for_tests, dispose_engines, drop_all_for_tests
 from siqueira_memo.hermes_provider.provider import SiqueiraMemoProvider
 from siqueira_memo.hermes_provider.tools import TOOL_NAMES, tool_schemas
-from siqueira_memo.models import Chunk, Decision, Fact, MemoryEvent, Message
+from siqueira_memo.models import Chunk, Decision, Fact, MemoryEvent, Message, SessionSummary
 from siqueira_memo.workers.jobs import register_default_handlers, set_worker_settings
 from siqueira_memo.workers.queue import MemoryJobQueue, set_default_queue
 
@@ -159,32 +159,110 @@ async def test_sync_turn_handler_persists_redacted_messages_chunks_and_memory(pr
 
 
 @pytest.mark.asyncio
-async def test_queue_prefetch_enqueues(provider):
+async def test_queue_prefetch_warms_context_cache(provider):
     prov, _settings, queue = provider
-    prov.queue_prefetch("test query", session_id="s1")
+    register_default_handlers(queue)
+    raw = prov.handle_tool_call(
+        "siqueira_memory_remember",
+        {
+            "kind": "fact",
+            "subject": "siqueira-memo",
+            "predicate": "captures",
+            "object": "aggressive memory capture",
+            "statement": "Siqueira Memo captures aggressive memory turns.",
+            "confidence": 0.95,
+        },
+    )
+    assert json.loads(raw)["ok"] is True
+
+    prov.queue_prefetch("aggressive memory capture", session_id="s1")
     assert queue.pending() >= 1
+    await queue.drain()
+
+    cached = prov.prefetch("aggressive memory capture", session_id="s1")
+    assert "prefetch cache cold" not in " ".join(cached.get("warnings", []))
+    assert cached["facts"]
 
 
 @pytest.mark.asyncio
 async def test_on_memory_write_mirrors(provider):
-    prov, _settings, queue = provider
+    prov, settings, queue = provider
+    register_default_handlers(queue)
     prov.on_memory_write("add", "memory", "Mark prefers concise answers")
     assert queue.pending() >= 1
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        events = (
+            await session.execute(
+                select(MemoryEvent).where(MemoryEvent.event_type == "builtin_memory_mirror")
+            )
+        ).scalars().all()
+        assert events
 
 
 @pytest.mark.asyncio
 async def test_on_delegation_records(provider):
-    prov, _settings, queue = provider
+    prov, settings, queue = provider
+    register_default_handlers(queue)
     prov.on_delegation("research X", "summary of X", child_session_id="child-1")
     assert queue.pending() >= 1
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        events = (
+            await session.execute(
+                select(MemoryEvent).where(MemoryEvent.event_type == "delegation_observed")
+            )
+        ).scalars().all()
+        assert events
 
 
 @pytest.mark.asyncio
-async def test_on_pre_compress_enqueues_but_returns_empty_string(provider):
-    prov, _settings, queue = provider
+async def test_on_pre_compress_records_hook_event(provider):
+    prov, settings, queue = provider
+    register_default_handlers(queue)
     ret = prov.on_pre_compress([{"role": "user", "content": "blah"}])
     assert ret == ""
     assert queue.pending() >= 1
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        events = (
+            await session.execute(
+                select(MemoryEvent).where(MemoryEvent.event_type == "pre_compress_extract")
+            )
+        ).scalars().all()
+        assert events
+
+
+@pytest.mark.asyncio
+async def test_on_session_end_creates_session_summary(provider):
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+    prov.sync_turn("remember this useful session detail", "captured useful answer", session_id="session-end")
+    prov.on_session_end([])
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        summaries = (
+            await session.execute(
+                select(SessionSummary).where(SessionSummary.session_id == "test-session")
+            )
+        ).scalars().all()
+        assert summaries
 
 
 def test_is_hermes_auxiliary_compaction():

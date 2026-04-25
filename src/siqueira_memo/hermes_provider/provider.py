@@ -30,6 +30,11 @@ from typing import Any
 
 from siqueira_memo.config import Settings, get_settings
 from siqueira_memo.db import dispose_engines, get_session_factory
+from siqueira_memo.hermes_provider.prefetch_cache import (
+    clear_prefetch_cache,
+    get_prefetch_cache,
+    set_prefetch_cache,
+)
 from siqueira_memo.hermes_provider.tools import TOOL_NAMES, tool_schemas
 from siqueira_memo.logging import get_logger
 from siqueira_memo.models.constants import (
@@ -371,6 +376,10 @@ class SiqueiraMemoProvider:
         cached: dict[str, Any] | None = self._prefetch_cache.get(
             self._cache_key(query, session_id)
         )
+        if cached is None:
+            cached = get_prefetch_cache(
+                self._profile_id, session_id or self._session_id, query
+            )
         if cached is not None:
             return cached
         return {
@@ -523,9 +532,16 @@ class SiqueiraMemoProvider:
 
     def set_prefetch_cache(self, query: str, session_id: str, value: dict[str, Any]) -> None:
         self._prefetch_cache[self._cache_key(query, session_id)] = value
+        set_prefetch_cache(
+            self._profile_id,
+            session_id or self._session_id,
+            query,
+            value,
+        )
 
     def clear_prefetch_cache(self) -> None:
         self._prefetch_cache.clear()
+        clear_prefetch_cache()
 
 
 def _parse_dt(value: Any) -> Any:

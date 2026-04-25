@@ -16,8 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from siqueira_memo.config import Settings, get_settings
 from siqueira_memo.db import get_session_factory
+from siqueira_memo.hermes_provider.prefetch_cache import set_prefetch_cache
 from siqueira_memo.logging import get_logger
-from siqueira_memo.models import Chunk, Message, ToolEvent
+from siqueira_memo.models import Chunk, MemoryEvent, Message, SessionSummary, ToolEvent
 from siqueira_memo.models.constants import (
     CHUNK_SOURCE_MESSAGE,
     CHUNK_SOURCE_TOOL_OUTPUT,
@@ -25,9 +26,16 @@ from siqueira_memo.models.constants import (
     ROLE_ASSISTANT,
     ROLE_USER,
 )
-from siqueira_memo.schemas.ingest import MessageIngestIn
+from siqueira_memo.schemas.ingest import (
+    BuiltinMemoryMirrorIn,
+    DelegationObservationIn,
+    GenericEventIn,
+    MessageIngestIn,
+)
 from siqueira_memo.schemas.memory import RememberRequest
+from siqueira_memo.schemas.recall import RecallRequest
 from siqueira_memo.services.chunking_service import ChunkingService
+from siqueira_memo.services.context_pack_service import ContextPackShaper
 from siqueira_memo.services.embedding_registry import EmbeddingRegistry
 from siqueira_memo.services.embedding_service import (
     EmbeddingProvider,
@@ -36,6 +44,7 @@ from siqueira_memo.services.embedding_service import (
 from siqueira_memo.services.extraction_gate import default_gate
 from siqueira_memo.services.extraction_service import ExtractionService
 from siqueira_memo.services.ingest_service import IngestService
+from siqueira_memo.services.retrieval_service import RetrievalService
 from siqueira_memo.services.scope_classifier import classify_memory_scope
 from siqueira_memo.workers.queue import Job, JobQueue, get_default_queue
 
@@ -270,6 +279,150 @@ async def embed_chunks_for_source(
     return embedded
 
 
+async def prefetch_warm_handler(payload: dict[str, Any]) -> None:
+    """Run a balanced recall and cache the prompt-safe context pack."""
+    ctx = JobContext.default()
+    factory = get_session_factory(ctx.settings)
+    profile_id = str(payload["profile_id"])
+    session_id = str(payload.get("session_id") or "")
+    query = str(payload.get("query") or "")
+    if not query.strip():
+        return
+    async with factory() as session:
+        retrieval = RetrievalService(
+            profile_id=profile_id,
+            embedding_provider=build_embedding_provider(ctx.settings),
+        )
+        result = await retrieval.recall(
+            session,
+            RecallRequest(
+                profile_id=profile_id,
+                session_id=session_id or None,
+                query=query,
+                mode="balanced",
+                limit=15,
+                include_sources=True,
+            ),
+        )
+        shaped = ContextPackShaper(ctx.settings).shape_for_prefetch(
+            result.context_pack, "balanced"
+        )
+        await session.commit()
+    set_prefetch_cache(
+        profile_id,
+        session_id,
+        query,
+        shaped.model_dump(mode="json"),
+    )
+
+
+async def builtin_memory_mirror_handler(payload: dict[str, Any]) -> None:
+    ctx = JobContext.default()
+    factory = get_session_factory(ctx.settings)
+    profile_id = str(payload["profile_id"])
+    async with factory() as session:
+        await IngestService(profile_id=profile_id).ingest_builtin_memory_mirror(
+            session,
+            BuiltinMemoryMirrorIn(
+                profile_id=profile_id,
+                session_id=str(payload.get("session_id") or ""),
+                action=payload.get("action", "add"),
+                target=payload.get("target", "memory"),
+                content=payload.get("content"),
+                selector=payload.get("selector"),
+            ),
+        )
+        await session.commit()
+
+
+async def delegation_observed_handler(payload: dict[str, Any]) -> None:
+    ctx = JobContext.default()
+    factory = get_session_factory(ctx.settings)
+    profile_id = str(payload["profile_id"])
+    async with factory() as session:
+        await IngestService(profile_id=profile_id).ingest_delegation(
+            session,
+            DelegationObservationIn(
+                profile_id=profile_id,
+                parent_session_id=str(payload.get("parent_session_id") or ""),
+                child_session_id=payload.get("child_session_id"),
+                task=str(payload.get("task") or ""),
+                result=str(payload.get("result") or ""),
+                toolsets=list(payload.get("toolsets") or []),
+                model=payload.get("model"),
+            ),
+        )
+        await session.commit()
+
+
+async def pre_compress_extract_handler(payload: dict[str, Any]) -> None:
+    ctx = JobContext.default()
+    factory = get_session_factory(ctx.settings)
+    profile_id = str(payload["profile_id"])
+    session_id = str(payload.get("session_id") or "")
+    async with factory() as session:
+        await IngestService(profile_id=profile_id).ingest_event(
+            session,
+            GenericEventIn(
+                profile_id=profile_id,
+                session_id=session_id,
+                event_type="pre_compress_extract",
+                source="hermes_pre_compress",
+                actor="hermes",
+                agent_context="primary",
+                payload={
+                    "event_type": "pre_compress_extract",
+                    "message_count": payload.get("message_count", 0),
+                },
+            ),
+        )
+        await session.commit()
+
+
+async def session_end_summarise_handler(payload: dict[str, Any]) -> None:
+    ctx = JobContext.default()
+    factory = get_session_factory(ctx.settings)
+    profile_id = str(payload["profile_id"])
+    session_id = str(payload.get("session_id") or "")
+    async with factory() as session:
+        rows = (
+            await session.execute(
+                select(Message)
+                .where(Message.profile_id == profile_id, Message.session_id == session_id)
+                .order_by(Message.created_at.asc())
+            )
+        ).scalars().all()
+        preview = "\n".join(f"{m.role}: {m.content_redacted}" for m in rows)[-2000:]
+        event_id = uuid.uuid4()
+        session.add(
+            MemoryEvent(
+                id=event_id,
+                event_type="summary_created",
+                source="session_end_summarise",
+                actor="siqueira-worker",
+                session_id=session_id,
+                profile_id=profile_id,
+                payload={
+                    "event_type": "summary_created",
+                    "message_count": len(rows),
+                },
+            )
+        )
+        session.add(
+            SessionSummary(
+                profile_id=profile_id,
+                session_id=session_id,
+                summary_short=(preview[:500] or "No messages captured for session."),
+                summary_long=(preview or "No messages captured for session."),
+                source_event_ids=[event_id],
+                model="heuristic",
+                model_version="aggressive-v1",
+                prompt_version="v1",
+            )
+        )
+        await session.commit()
+
+
 async def sync_turn_handler(payload: dict[str, Any]) -> None:
     """Persist a completed Hermes turn and enqueue aggressive extraction."""
     ctx = JobContext.default()
@@ -480,3 +633,8 @@ def register_default_handlers(queue: JobQueue) -> None:
     queue.register("embed_chunks", embed_chunks_handler)
     queue.register("siqueira.sync_turn", sync_turn_handler)
     queue.register("siqueira.extract_turn_memory", extract_turn_memory_handler)
+    queue.register("siqueira.prefetch_warm", prefetch_warm_handler)
+    queue.register("siqueira.builtin_memory_mirror", builtin_memory_mirror_handler)
+    queue.register("siqueira.delegation_observed", delegation_observed_handler)
+    queue.register("siqueira.pre_compress_extract", pre_compress_extract_handler)
+    queue.register("siqueira.session_end_summarise", session_end_summarise_handler)
