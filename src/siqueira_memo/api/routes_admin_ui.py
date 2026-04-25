@@ -2,10 +2,68 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
-from fastapi.responses import HTMLResponse
+from html import escape
+from typing import cast
+from urllib.parse import parse_qs
+
+from fastapi import APIRouter, Request, status
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
+
+from siqueira_memo.api.deps import (
+    ADMIN_SESSION_COOKIE,
+    admin_auth_enabled,
+    create_admin_session_token,
+    request_has_admin_session,
+    verify_admin_password,
+)
+from siqueira_memo.config import Settings
+
+_LOGIN_HTML = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Siqueira Memo Admin Login</title>
+  <style>
+    :root { --bg: #fbfaf8; --card: #fff; --text: #22211f; --muted: #6d675f; --line: rgba(34,33,31,.13); --accent: #1d6fd8; --danger: #a73522; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 22px; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { width: min(100%, 420px); background: var(--card); border: 1px solid var(--line); border-radius: 24px; padding: 28px; box-shadow: rgba(0,0,0,.05) 0 18px 50px, rgba(0,0,0,.03) 0 4px 16px; }
+    .eyebrow { margin: 0 0 10px; color: var(--accent); font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    h1 { margin: 0 0 8px; font-size: clamp(28px, 7vw, 38px); letter-spacing: -.05em; }
+    p { margin: 0 0 24px; color: var(--muted); line-height: 1.5; }
+    label { display: block; margin: 0 0 8px; font-size: 13px; font-weight: 750; }
+    input { width: 100%; min-height: 46px; border: 1px solid var(--line); border-radius: 14px; padding: 0 13px; font: inherit; background: #fff; color: var(--text); }
+    input:focus { outline: 3px solid rgba(29,111,216,.15); border-color: rgba(29,111,216,.65); }
+    button { width: 100%; min-height: 46px; margin-top: 14px; border: 0; border-radius: 14px; background: var(--accent); color: white; font: inherit; font-weight: 800; cursor: pointer; }
+    .error { margin: 0 0 16px; padding: 10px 12px; border-radius: 14px; background: rgba(167,53,34,.09); color: var(--danger); border: 1px solid rgba(167,53,34,.18); }
+    @media (max-width: 720px) { body { padding: 12px; align-items: start; padding-top: 12vh; } main { border-radius: 20px; padding: 22px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">Private dashboard</p>
+    <h1>Siqueira Memo Admin</h1>
+    <p>Enter the admin password to open the memory dashboard.</p>
+    {error}
+    <form method="post" action="/admin/login" autocomplete="on">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <button type="submit">Log in</button>
+    </form>
+  </main>
+</body>
+</html>"""
+
+
+def _login_html(error: str = "") -> str:
+    if not error:
+        return _LOGIN_HTML.replace("{error}", "")
+    return _LOGIN_HTML.replace("{error}", f'<p class="error">{escape(error)}</p>')
+
 
 router = APIRouter()
+
 
 _ADMIN_HTML = """<!doctype html>
 <html lang="en">
@@ -83,6 +141,7 @@ _ADMIN_HTML = """<!doctype html>
     .empty { color: var(--muted); text-align: center; border: 1px dashed var(--line); border-radius: 15px; padding: 28px 14px; background: rgba(255,255,255,.62); }
     .status { min-height: 20px; margin-top: 9px; color: var(--muted); font-size: 12px; }
     .top-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .top-actions form { margin: 0; }
     .drawer-backdrop { position: fixed; inset: 0; background: rgba(34,33,31,.18); display: none; z-index: 30; }
     .drawer-backdrop.open { display: block; }
     .drawer { position: fixed; right: 0; top: 0; height: 100vh; width: min(620px, 100%); background: var(--surface); border-left: 1px solid var(--line); box-shadow: rgba(0,0,0,.12) -18px 0 50px; z-index: 40; transform: translateX(105%); transition: transform .16s ease; overflow: auto; }
@@ -113,7 +172,7 @@ _ADMIN_HTML = """<!doctype html>
   <main class="shell">
     <header class="topbar">
       <div class="brand"><div class="logo">S</div><div><h1>Siqueira Memo</h1><p class="subtitle">Project overview, memory search, recall playground, corrections, conflicts, audit, and export.</p></div></div>
-      <div class="top-actions"><span class="badge">Light admin</span><button class="btn small" id="check-ready">Check ready</button></div>
+      <div class="top-actions"><span class="badge">Light admin</span><button class="btn small" id="check-ready" type="button">Check ready</button><form method="post" action="/admin/logout"><button class="btn small" type="submit">Log out</button></form></div>
     </header>
 
     <section class="layout">
@@ -232,13 +291,66 @@ _ADMIN_HTML = """<!doctype html>
 """
 
 
-@router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
-async def admin_ui() -> HTMLResponse:
-    """Serve the zero-build browser admin interface."""
+def _settings(request: Request) -> Settings:
+    return cast(Settings, request.app.state.settings)
+
+
+def _redirect_to_login() -> RedirectResponse:
+    return RedirectResponse("/admin/login", status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _serve_admin_or_redirect(request: Request) -> Response:
+    settings = _settings(request)
+    if admin_auth_enabled(settings) and not request_has_admin_session(request):
+        return _redirect_to_login()
     return HTMLResponse(_ADMIN_HTML)
+
+
+@router.get("/admin/login", response_class=HTMLResponse, include_in_schema=False)
+async def admin_login(request: Request) -> Response:
+    """Serve the app-level admin login page instead of a browser Basic Auth prompt."""
+    settings = _settings(request)
+    if not admin_auth_enabled(settings) or request_has_admin_session(request):
+        return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
+    return HTMLResponse(_login_html())
+
+
+@router.post("/admin/login", include_in_schema=False)
+async def admin_login_submit(request: Request) -> Response:
+    """Validate the admin password and set a signed HttpOnly session cookie."""
+    settings = _settings(request)
+    form = parse_qs((await request.body()).decode("utf-8"), keep_blank_values=True)
+    password = form.get("password", [""])[0]
+    if not verify_admin_password(settings, password):
+        return HTMLResponse(_login_html("Invalid password"), status_code=status.HTTP_401_UNAUTHORIZED)
+    response = RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
+    response.set_cookie(
+        ADMIN_SESSION_COOKIE,
+        create_admin_session_token(settings),
+        max_age=settings.admin_session_ttl_seconds,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=settings.admin_cookie_secure,
+    )
+    return response
+
+
+@router.post("/admin/logout", include_in_schema=False)
+async def admin_logout() -> RedirectResponse:
+    """Clear the browser admin session cookie."""
+    response = RedirectResponse("/admin/login", status_code=status.HTTP_303_SEE_OTHER)
+    response.delete_cookie(ADMIN_SESSION_COOKIE, path="/")
+    return response
+
+
+@router.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+async def admin_ui(request: Request) -> Response:
+    """Serve the zero-build browser admin interface."""
+    return _serve_admin_or_redirect(request)
 
 
 @router.get("/admin/", response_class=HTMLResponse, include_in_schema=False)
-async def admin_ui_slash() -> HTMLResponse:
+async def admin_ui_slash(request: Request) -> Response:
     """Serve the same UI with a trailing slash."""
-    return HTMLResponse(_ADMIN_HTML)
+    return _serve_admin_or_redirect(request)

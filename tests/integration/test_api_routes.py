@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from http import cookies
+
 import httpx
 import pytest
 import pytest_asyncio
+from pydantic import SecretStr
 
 from siqueira_memo.config import settings_for_tests
 from siqueira_memo.db import (
@@ -18,7 +21,10 @@ from siqueira_memo.workers.queue import MemoryJobQueue, set_default_queue
 
 @pytest_asyncio.fixture
 async def api_client():
-    settings = settings_for_tests()
+    settings = settings_for_tests(
+        admin_password=SecretStr("test-admin-password"),
+        admin_session_secret=SecretStr("test-admin-session-secret"),
+    )
     await create_all_for_tests(settings)
     set_default_queue(MemoryJobQueue())
     app = create_app(settings)
@@ -74,12 +80,49 @@ async def test_ingest_requires_auth(api_client):
 
 
 @pytest.mark.asyncio
-async def test_admin_ui_is_lightweight_mobile_friendly_and_unauthenticated(api_client):
+async def test_admin_ui_uses_form_login_instead_of_basic_auth_popup(api_client):
     client, _settings = api_client
-    resp = await client.get("/admin")
-    assert resp.status_code == 200
-    assert resp.headers["content-type"].startswith("text/html")
-    html = resp.text
+    resp = await client.get("/admin", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/admin/login"
+    assert "www-authenticate" not in resp.headers
+
+    login = await client.get("/admin/login")
+    assert login.status_code == 200
+    assert login.headers["content-type"].startswith("text/html")
+    assert "www-authenticate" not in login.headers
+    assert "Siqueira Memo Admin" in login.text
+    assert '<form method="post" action="/admin/login"' in login.text
+    assert 'name="password"' in login.text
+
+    wrong = await client.post(
+        "/admin/login",
+        data={"password": "wrong-password"},
+        follow_redirects=False,
+    )
+    assert wrong.status_code == 401
+    assert "Invalid password" in wrong.text
+    assert "www-authenticate" not in wrong.headers
+
+    ok = await client.post(
+        "/admin/login",
+        data={"password": "test-admin-password"},
+        follow_redirects=False,
+    )
+    assert ok.status_code == 303
+    assert ok.headers["location"] == "/admin"
+    morsel = cookies.SimpleCookie(ok.headers["set-cookie"])["siqueira_admin_session"]
+    assert morsel["httponly"]
+    assert morsel["samesite"].lower() == "lax"
+
+    dashboard = await client.get("/admin")
+    assert dashboard.status_code == 200
+    assert dashboard.headers["content-type"].startswith("text/html")
+
+    session_api = await client.post("/v1/admin/projects", json={"profile_id": "default"})
+    assert session_api.status_code == 200, session_api.text
+
+    html = dashboard.text
     assert "Siqueira Memo" in html
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in html
     assert "linear-gradient" not in html.lower()
@@ -107,6 +150,13 @@ async def test_admin_ui_is_lightweight_mobile_friendly_and_unauthenticated(api_c
     assert "/v1/memory/timeline" in html
     assert "/v1/memory/sources" in html
     assert "--bg: #fbfaf8" in html
+
+    logout = await client.post("/admin/logout", follow_redirects=False)
+    assert logout.status_code == 303
+    assert logout.headers["location"] == "/admin/login"
+    cleared = cookies.SimpleCookie(logout.headers["set-cookie"])["siqueira_admin_session"]
+    assert cleared.value == ""
+    assert int(cleared["max-age"]) == 0
 
 
 @pytest.mark.asyncio

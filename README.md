@@ -113,10 +113,13 @@ Routes (all POSTs require `Authorization: Bearer $SIQUEIRA_API_TOKEN`):
 
 The `/admin` UI is a small light-themed HTML/CSS/vanilla-JS console with a
 mobile bottom nav, project overview, detail drawer, recall playground, correction
-flow, conflict/audit panels, sources lookup, soft delete, and Markdown export. It
-stores `SIQUEIRA_API_TOKEN` only in browser `localStorage` and calls the
-authenticated API endpoints with a Bearer token; keep the service bound to
-localhost unless you put real auth in front.
+flow, conflict/audit panels, sources lookup, soft delete, and Markdown export. Set
+`SIQUEIRA_ADMIN_PASSWORD` and `SIQUEIRA_ADMIN_SESSION_SECRET` to enable the
+built-in form login with a signed `HttpOnly`/`SameSite=Lax` session cookie. API
+endpoints still accept Bearer tokens, and browser admin sessions can call the
+admin/recall/memory endpoints without exposing `SIQUEIRA_API_TOKEN` to JS. Keep
+`SIQUEIRA_ADMIN_COOKIE_SECURE=false` on plain HTTP tailnet URLs; flip it only
+behind HTTPS.
 
 ## Run the worker
 

@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8787
     api_token: SecretStr = Field(default=SecretStr("local-dev-token"))
+    admin_password: SecretStr | None = None
+    admin_session_secret: SecretStr | None = None
+    admin_session_ttl_seconds: int = 60 * 60 * 12
+    admin_cookie_secure: bool = False
 
     database_url: str = "sqlite+aiosqlite:///./siqueira_memo.db"
     database_echo: bool = False
