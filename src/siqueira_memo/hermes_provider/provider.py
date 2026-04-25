@@ -378,7 +378,10 @@ class SiqueiraMemoProvider:
         )
         if cached is None:
             cached = get_prefetch_cache(
-                self._profile_id, session_id or self._session_id, query
+                self._profile_id,
+                session_id or self._session_id,
+                query,
+                self._settings,
             )
         if cached is not None:
             return cached
@@ -537,6 +540,7 @@ class SiqueiraMemoProvider:
             session_id or self._session_id,
             query,
             value,
+            self._settings,
         )
 
     def clear_prefetch_cache(self) -> None:

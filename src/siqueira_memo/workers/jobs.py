@@ -313,6 +313,7 @@ async def prefetch_warm_handler(payload: dict[str, Any]) -> None:
         session_id,
         query,
         shaped.model_dump(mode="json"),
+        ctx.settings,
     )
 
 
