@@ -105,6 +105,7 @@ Routes (all POSTs require `Authorization: Bearer $SIQUEIRA_API_TOKEN`):
 | GET    | `/admin`                            | zero-build browser admin UI         |
 | POST   | `/v1/admin/projects`                | project overview counts             |
 | POST   | `/v1/admin/search`                  | admin search                        |
+| POST   | `/v1/admin/capture`                 | capture pipeline counters           |
 | POST   | `/v1/admin/detail`                  | detail + provenance payload         |
 | POST   | `/v1/admin/export`                  | Markdown export                     |
 | POST   | `/v1/admin/conflicts/scan`          | detect memory conflicts             |
@@ -113,7 +114,8 @@ Routes (all POSTs require `Authorization: Bearer $SIQUEIRA_API_TOKEN`):
 
 The `/admin` UI is a small light-themed HTML/CSS/vanilla-JS console with a
 mobile bottom nav, project overview, detail drawer, recall playground, correction
-flow, conflict/audit panels, sources lookup, soft delete, and Markdown export. Set
+flow, capture counters/global-memory view, conflict/audit panels, sources lookup,
+soft delete, and Markdown export. Set
 `SIQUEIRA_ADMIN_PASSWORD` and `SIQUEIRA_ADMIN_SESSION_SECRET` to enable the
 built-in form login with a signed `HttpOnly`/`SameSite=Lax` session cookie. API
 endpoints still accept Bearer tokens, and browser admin sessions can call the

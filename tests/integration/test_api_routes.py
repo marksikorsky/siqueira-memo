@@ -135,12 +135,16 @@ async def test_admin_ui_uses_form_login_instead_of_basic_auth_popup(api_client):
     assert "Project overview" in html
     assert "Detail drawer" in html
     assert "Recall playground" in html
+    assert "Memory Capture" in html
+    assert "project-scope" in html
+    assert "Global" in html
     assert "Conflicts" in html
     assert "Audit" in html
     assert "Export Markdown" in html
     assert "bottom-nav" in html
     assert "safe-area-inset-bottom" in html
     assert "/v1/admin/projects" in html
+    assert "/v1/admin/capture" in html
     assert "/v1/admin/detail" in html
     assert "/v1/admin/export" in html
     assert "/v1/recall" in html
@@ -222,6 +226,78 @@ async def test_admin_projects_detail_and_export(api_client):
     assert export.headers["content-type"].startswith("text/markdown")
     assert "# Siqueira Memo Memory Export" in export.text
     assert "Siqueira UI has a project overview dashboard." in export.text
+
+
+@pytest.mark.asyncio
+async def test_admin_search_supports_global_scope_and_capture_stats(api_client):
+    client, settings = api_client
+    auth = _auth(settings)
+    global_fact = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "fact",
+            "subject": "Mark",
+            "predicate": "memory policy",
+            "object": "save almost everything useful",
+            "statement": "Mark wants Siqueira to save almost everything useful globally.",
+            "project": None,
+            "topic": "memory-write-policy",
+        },
+    )
+    assert global_fact.status_code == 200, global_fact.text
+    project_fact = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "fact",
+            "subject": "Siqueira",
+            "predicate": "has",
+            "object": "capture dashboard",
+            "statement": "Siqueira has a capture dashboard.",
+            "project": "siqueira-memo",
+            "topic": "capture",
+        },
+    )
+    assert project_fact.status_code == 200, project_fact.text
+
+    global_search = await client.post(
+        "/v1/admin/search",
+        headers=auth,
+        json={"target_type": "fact", "project_scope": "global", "limit": 20},
+    )
+    assert global_search.status_code == 200, global_search.text
+    global_hits = global_search.json()["hits"]
+    assert global_hits
+    assert all(hit["project"] is None for hit in global_hits)
+    assert any("almost everything useful" in hit["preview"] for hit in global_hits)
+
+    project_search = await client.post(
+        "/v1/admin/search",
+        headers=auth,
+        json={
+            "target_type": "fact",
+            "project_scope": "project",
+            "project": "siqueira-memo",
+            "limit": 20,
+        },
+    )
+    assert project_search.status_code == 200, project_search.text
+    project_hits = project_search.json()["hits"]
+    assert project_hits
+    assert all(hit["project"] == "siqueira-memo" for hit in project_hits)
+
+    capture = await client.post(
+        "/v1/admin/capture",
+        headers=auth,
+        json={"profile_id": "default"},
+    )
+    assert capture.status_code == 200, capture.text
+    capture_body = capture.json()
+    assert capture_body["mode"] == "aggressive"
+    assert capture_body["structured_facts"] >= 2
+    assert capture_body["global_memories"] >= 1
+    assert "recent_global_memories" in capture_body
 
 
 @pytest.mark.asyncio

@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     admin_session_secret: SecretStr | None = None
     admin_session_ttl_seconds: int = 60 * 60 * 12
     admin_cookie_secure: bool = False
+    memory_capture_mode: Literal["off", "conservative", "balanced", "aggressive"] = "aggressive"
+    memory_capture_target_ratio: float = 0.8
+    memory_capture_save_raw_turns: bool = True
+    memory_capture_extract_structured: bool = True
 
     database_url: str = "sqlite+aiosqlite:///./siqueira_memo.db"
     database_echo: bool = False

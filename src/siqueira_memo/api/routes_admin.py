@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Response, status
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 
 from siqueira_memo.api.deps import AuthDep, ProfileDep, SessionDep
+from siqueira_memo.config import get_settings
 from siqueira_memo.models import (
+    Chunk,
+    ChunkEmbeddingBGEM3,
+    ChunkEmbeddingMock,
+    ChunkEmbeddingOpenAITEL3,
     Decision,
     DecisionSource,
     Fact,
@@ -36,6 +42,18 @@ router = APIRouter(prefix="/v1/admin")
 _PREVIEW = 200
 
 
+def _apply_project_scope(stmt: Any, model: type[Any], payload: AdminSearchRequest) -> Any:
+    if payload.project_scope == "global":
+        return stmt.where(model.project.is_(None))
+    if payload.project_scope == "project":
+        if not payload.project:
+            return stmt.where(literal(False))
+        return stmt.where(model.project == payload.project)
+    if payload.project:
+        return stmt.where(model.project == payload.project)
+    return stmt
+
+
 @router.post("/search", response_model=AdminSearchResponse)
 async def search(
     payload: AdminSearchRequest,
@@ -51,8 +69,7 @@ async def search(
         if payload.query:
             pattern = f"%{payload.query}%"
             m_stmt = m_stmt.where(Message.content_redacted.ilike(pattern))
-        if payload.project:
-            m_stmt = m_stmt.where(Message.project == payload.project)
+        m_stmt = _apply_project_scope(m_stmt, Message, payload)
         if payload.topic:
             m_stmt = m_stmt.where(Message.topic == payload.topic)
         if payload.since:
@@ -86,8 +103,7 @@ async def search(
         if payload.query:
             pattern = f"%{payload.query}%"
             f_stmt = f_stmt.where(Fact.statement.ilike(pattern))
-        if payload.project:
-            f_stmt = f_stmt.where(Fact.project == payload.project)
+        f_stmt = _apply_project_scope(f_stmt, Fact, payload)
         if payload.status:
             f_stmt = f_stmt.where(Fact.status == payload.status)
         total = (
@@ -117,8 +133,7 @@ async def search(
         if payload.query:
             pattern = f"%{payload.query}%"
             d_stmt = d_stmt.where(Decision.decision.ilike(pattern))
-        if payload.project:
-            d_stmt = d_stmt.where(Decision.project == payload.project)
+        d_stmt = _apply_project_scope(d_stmt, Decision, payload)
         if payload.topic:
             d_stmt = d_stmt.where(Decision.topic == payload.topic)
         if payload.status:
@@ -257,6 +272,126 @@ async def projects(
         projects_out.append(item)
     projects_out.sort(key=lambda p: (-int(p["total"]), str(p["project"])))
     return {"projects": projects_out}
+
+
+async def _count_rows(session: SessionDep, stmt: Any) -> int:
+    return int((await session.execute(stmt)).scalar_one() or 0)
+
+
+@router.post("/capture")
+async def capture_stats(
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+    payload: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    """Return aggressive memory-capture observability counters for the dashboard."""
+    settings = get_settings()
+    profile_filter = str(payload.get("profile_id") or profile_id)
+    since = datetime.now(UTC) - timedelta(days=1)
+
+    raw_turns_today = await _count_rows(
+        session,
+        select(func.count()).select_from(Message).where(
+            Message.profile_id == profile_filter,
+            Message.created_at >= since,
+        ),
+    )
+    chunks_created = await _count_rows(
+        session,
+        select(func.count()).select_from(Chunk).where(Chunk.profile_id == profile_filter),
+    )
+    embeddings_created = 0
+    for embedding_model in (ChunkEmbeddingMock, ChunkEmbeddingOpenAITEL3, ChunkEmbeddingBGEM3):
+        embeddings_created += await _count_rows(
+            session,
+            select(func.count())
+            .select_from(embedding_model)
+            .join(Chunk, Chunk.id == embedding_model.chunk_id)
+            .where(Chunk.profile_id == profile_filter),
+        )
+    structured_facts = await _count_rows(
+        session,
+        select(func.count()).select_from(Fact).where(Fact.profile_id == profile_filter),
+    )
+    structured_decisions = await _count_rows(
+        session,
+        select(func.count()).select_from(Decision).where(Decision.profile_id == profile_filter),
+    )
+    skipped_sensitive = await _count_rows(
+        session,
+        select(func.count()).select_from(Message).where(
+            Message.profile_id == profile_filter,
+            Message.sensitivity == "sensitive",
+        ),
+    )
+    global_memories = await _count_rows(
+        session,
+        select(func.count()).select_from(Fact).where(
+            Fact.profile_id == profile_filter,
+            Fact.project.is_(None),
+        ),
+    ) + await _count_rows(
+        session,
+        select(func.count()).select_from(Decision).where(
+            Decision.profile_id == profile_filter,
+            Decision.project.is_(None),
+        ),
+    )
+
+    fact_rows = (
+        await session.execute(
+            select(Fact)
+            .where(Fact.profile_id == profile_filter, Fact.project.is_(None))
+            .order_by(Fact.created_at.desc())
+            .limit(5)
+        )
+    ).scalars().all()
+    decision_rows = (
+        await session.execute(
+            select(Decision)
+            .where(Decision.profile_id == profile_filter, Decision.project.is_(None))
+            .order_by(Decision.decided_at.desc())
+            .limit(5)
+        )
+    ).scalars().all()
+    recent_global_memories: list[dict[str, Any]] = [
+        {
+            "id": row.id,
+            "target_type": "fact",
+            "preview": row.statement[:_PREVIEW],
+            "project": row.project,
+            "topic": row.topic,
+            "status": row.status,
+            "created_at": row.created_at,
+        }
+        for row in fact_rows
+    ] + [
+        {
+            "id": row.id,
+            "target_type": "decision",
+            "preview": row.decision[:_PREVIEW],
+            "project": row.project,
+            "topic": row.topic,
+            "status": row.status,
+            "created_at": row.decided_at,
+        }
+        for row in decision_rows
+    ]
+    recent_global_memories.sort(key=lambda item: item["created_at"], reverse=True)
+
+    return {
+        "mode": settings.memory_capture_mode,
+        "target_ratio": settings.memory_capture_target_ratio,
+        "raw_turns_saved_today": raw_turns_today,
+        "chunks_created": chunks_created,
+        "embeddings_created": embeddings_created,
+        "structured_facts": structured_facts,
+        "structured_decisions": structured_decisions,
+        "skipped_sensitive": skipped_sensitive,
+        "global_memories": global_memories,
+        "recent_global_memories": recent_global_memories[:5],
+    }
 
 
 def _fact_to_detail(row: Fact) -> dict[str, Any]:

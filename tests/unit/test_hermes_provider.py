@@ -12,7 +12,8 @@ from siqueira_memo.config import settings_for_tests
 from siqueira_memo.db import create_all_for_tests, dispose_engines, drop_all_for_tests
 from siqueira_memo.hermes_provider.provider import SiqueiraMemoProvider
 from siqueira_memo.hermes_provider.tools import TOOL_NAMES, tool_schemas
-from siqueira_memo.models import MemoryEvent
+from siqueira_memo.models import Chunk, Decision, Fact, MemoryEvent, Message
+from siqueira_memo.workers.jobs import register_default_handlers, set_worker_settings
 from siqueira_memo.workers.queue import MemoryJobQueue, set_default_queue
 
 
@@ -22,6 +23,7 @@ async def provider():
     await create_all_for_tests(settings)
     queue = MemoryJobQueue()
     set_default_queue(queue)
+    set_worker_settings(settings)
 
     prov = SiqueiraMemoProvider()
     prov._settings = settings
@@ -29,6 +31,7 @@ async def provider():
     try:
         yield prov, settings, queue
     finally:
+        set_worker_settings(None)
         set_default_queue(None)
         await drop_all_for_tests(settings)
         await dispose_engines()
@@ -104,6 +107,55 @@ async def test_sync_turn_is_non_blocking(provider):
     prov, _settings, queue = provider
     prov.sync_turn("hello assistant", "hi user", session_id="s1")
     assert queue.pending() >= 1
+
+
+@pytest.mark.asyncio
+async def test_sync_turn_handler_persists_redacted_messages_chunks_and_memory(provider):
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+
+    prov.sync_turn(
+        "Марк хочет чтобы Siqueira сохраняла почти всё полезное обсуждение.",
+        "Решение: включаем aggressive memory capture для Siqueira.",
+        session_id="s-aggressive",
+    )
+    drained = await queue.drain()
+    assert drained >= 3
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        messages = (
+            await session.execute(
+                select(Message)
+                .where(Message.session_id == "s-aggressive")
+                .order_by(Message.created_at.asc())
+            )
+        ).scalars().all()
+        assert [m.role for m in messages] == ["user", "assistant"]
+        assert all(m.content_redacted for m in messages)
+        assert all(m.project is None for m in messages)
+
+        chunks = (
+            await session.execute(
+                select(Chunk).where(Chunk.profile_id == prov._profile_id)  # noqa: SLF001
+            )
+        ).scalars().all()
+        assert len(chunks) >= 2
+
+        facts = (
+            await session.execute(
+                select(Fact).where(Fact.profile_id == prov._profile_id)  # noqa: SLF001
+            )
+        ).scalars().all()
+        decisions = (
+            await session.execute(
+                select(Decision).where(Decision.profile_id == prov._profile_id)  # noqa: SLF001
+            )
+        ).scalars().all()
+        assert any("aggressive memory capture" in d.decision for d in decisions)
+        assert facts or decisions
 
 
 @pytest.mark.asyncio

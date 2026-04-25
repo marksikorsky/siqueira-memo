@@ -15,6 +15,7 @@ class AdminSearchRequest(MemoBase):
     profile_id: str | None = None
     query: str | None = None
     target_type: Literal["message", "fact", "decision", "summary", "chunk"] = "message"
+    project_scope: Literal["all", "global", "project"] = "all"
     project: str | None = None
     topic: str | None = None
     status: str | None = None

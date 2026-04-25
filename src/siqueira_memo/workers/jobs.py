@@ -21,7 +21,12 @@ from siqueira_memo.models import Chunk, Message, ToolEvent
 from siqueira_memo.models.constants import (
     CHUNK_SOURCE_MESSAGE,
     CHUNK_SOURCE_TOOL_OUTPUT,
+    MESSAGE_SOURCE_SYNC_TURN,
+    ROLE_ASSISTANT,
+    ROLE_USER,
 )
+from siqueira_memo.schemas.ingest import MessageIngestIn
+from siqueira_memo.schemas.memory import RememberRequest
 from siqueira_memo.services.chunking_service import ChunkingService
 from siqueira_memo.services.embedding_registry import EmbeddingRegistry
 from siqueira_memo.services.embedding_service import (
@@ -29,7 +34,10 @@ from siqueira_memo.services.embedding_service import (
     build_embedding_provider,
 )
 from siqueira_memo.services.extraction_gate import default_gate
-from siqueira_memo.workers.queue import JobQueue
+from siqueira_memo.services.extraction_service import ExtractionService
+from siqueira_memo.services.ingest_service import IngestService
+from siqueira_memo.services.scope_classifier import classify_memory_scope
+from siqueira_memo.workers.queue import Job, JobQueue, get_default_queue
 
 _settings_override: Settings | None = None
 
@@ -104,6 +112,17 @@ async def chunk_message_handler(payload: dict[str, Any]) -> None:
                 )
             )
         await session.commit()
+    get_default_queue().enqueue(
+        Job(
+            name="embed_chunks",
+            payload={
+                "profile_id": profile_id,
+                "source_type": CHUNK_SOURCE_MESSAGE,
+                "source_id": str(message_id),
+            },
+            dedup_key=f"embed:message:{message_id}",
+        )
+    )
     log.info(
         "chunk_message.done",
         extra={"message_id": str(message_id), "chunks": len(chunks)},
@@ -251,8 +270,213 @@ async def embed_chunks_for_source(
     return embedded
 
 
+async def sync_turn_handler(payload: dict[str, Any]) -> None:
+    """Persist a completed Hermes turn and enqueue aggressive extraction."""
+    ctx = JobContext.default()
+    if ctx.settings.memory_capture_mode == "off" or not ctx.settings.memory_capture_save_raw_turns:
+        return
+
+    factory = get_session_factory(ctx.settings)
+    profile_id = str(payload["profile_id"])
+    session_id = str(payload.get("session_id") or "")
+    agent_context = payload.get("agent_context")
+    user_content = str(payload.get("user_content") or "")
+    assistant_content = str(payload.get("assistant_content") or "")
+    combined = "\n".join(part for part in (user_content, assistant_content) if part.strip())
+    scope = classify_memory_scope(combined)
+    ingest = IngestService(profile_id=profile_id)
+    source_event_ids: list[str] = []
+    source_message_ids: list[str] = []
+
+    async with factory() as session:
+        if user_content.strip():
+            user_result = await ingest.ingest_message(
+                session,
+                MessageIngestIn(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    platform="hermes",
+                    role=ROLE_USER,
+                    content=user_content,
+                    source=MESSAGE_SOURCE_SYNC_TURN,
+                    project=scope.project,
+                    topic=scope.topic,
+                    agent_context=agent_context,
+                    metadata={
+                        "scope_confidence": scope.confidence,
+                        "scope_reason": scope.reason,
+                    },
+                ),
+            )
+            source_event_ids.append(str(user_result.event_id))
+            source_message_ids.append(str(user_result.message_id))
+        if assistant_content.strip():
+            assistant_result = await ingest.ingest_message(
+                session,
+                MessageIngestIn(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    platform="hermes",
+                    role=ROLE_ASSISTANT,
+                    content=assistant_content,
+                    source=MESSAGE_SOURCE_SYNC_TURN,
+                    project=scope.project,
+                    topic=scope.topic,
+                    agent_context=agent_context,
+                    metadata={
+                        "scope_confidence": scope.confidence,
+                        "scope_reason": scope.reason,
+                    },
+                ),
+            )
+            source_event_ids.append(str(assistant_result.event_id))
+            source_message_ids.append(str(assistant_result.message_id))
+        await session.commit()
+
+    if ctx.settings.memory_capture_extract_structured and source_message_ids:
+        get_default_queue().enqueue(
+            Job(
+                name="siqueira.extract_turn_memory",
+                payload={
+                    "profile_id": profile_id,
+                    "session_id": session_id,
+                    "user_content": user_content,
+                    "assistant_content": assistant_content,
+                    "source_event_ids": source_event_ids,
+                    "source_message_ids": source_message_ids,
+                    "project": scope.project,
+                    "topic": scope.topic,
+                    "scope_reason": scope.reason,
+                    "mode": ctx.settings.memory_capture_mode,
+                },
+                dedup_key=f"extract-turn:{profile_id}:{session_id}:{':'.join(source_message_ids)}",
+            )
+        )
+
+
+async def extract_turn_memory_handler(payload: dict[str, Any]) -> None:
+    """Deterministic aggressive v1 structured extraction for a turn."""
+    ctx = JobContext.default()
+    if ctx.settings.memory_capture_mode == "off":
+        return
+    profile_id = str(payload["profile_id"])
+    session_id = str(payload.get("session_id") or "")
+    user_content = str(payload.get("user_content") or "")
+    assistant_content = str(payload.get("assistant_content") or "")
+    combined = "\n".join(part for part in (user_content, assistant_content) if part.strip())
+    if not _looks_useful_for_structured_memory(combined):
+        return
+
+    source_event_ids = [uuid.UUID(str(x)) for x in payload.get("source_event_ids", [])]
+    source_message_ids = [uuid.UUID(str(x)) for x in payload.get("source_message_ids", [])]
+    project = payload.get("project")
+    topic = payload.get("topic") or "conversation"
+    svc = ExtractionService(
+        profile_id=profile_id,
+        actor="siqueira-capture",
+        model_provider="heuristic",
+        model_name="aggressive-v1",
+    )
+    factory = get_session_factory(ctx.settings)
+    async with factory() as session:
+        if _looks_like_decision(combined):
+            await svc.remember(
+                session,
+                RememberRequest(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    kind="decision",
+                    statement=_decision_statement(user_content, assistant_content),
+                    project=project,
+                    topic=topic,
+                    rationale="Aggressive turn capture detected decision/preference language.",
+                    confidence=0.9,
+                    source_event_ids=source_event_ids,
+                    source_message_ids=source_message_ids,
+                    metadata={"capture_mode": payload.get("mode", "aggressive")},
+                ),
+            )
+        else:
+            await svc.remember(
+                session,
+                RememberRequest(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    kind="fact",
+                    subject="conversation",
+                    predicate="captured",
+                    object=_fact_object(combined),
+                    statement=_fact_statement(combined),
+                    project=project,
+                    topic=topic,
+                    confidence=0.82,
+                    source_event_ids=source_event_ids,
+                    source_message_ids=source_message_ids,
+                    metadata={"capture_mode": payload.get("mode", "aggressive")},
+                ),
+            )
+        await session.commit()
+
+
+def _looks_useful_for_structured_memory(text: str) -> bool:
+    lowered = text.lower()
+    markers = (
+        "запомни",
+        "не забывай",
+        "решение",
+        "мы решили",
+        "надо",
+        "хочет",
+        "предпочитает",
+        "memory",
+        "siqueira",
+        "recall",
+        "deploy",
+        "auth",
+        "tax",
+        "crypto",
+    )
+    return len(text.strip()) >= 40 and any(marker in lowered for marker in markers)
+
+
+def _looks_like_decision(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "решение",
+            "мы решили",
+            "надо",
+            "хочет",
+            "предпочитает",
+            "should",
+            "must",
+            "decision",
+            "policy",
+            "use ",
+            "включаем",
+        )
+    )
+
+
+def _decision_statement(user_content: str, assistant_content: str) -> str:
+    preferred = assistant_content.strip() or user_content.strip()
+    return preferred[:900]
+
+
+def _fact_statement(text: str) -> str:
+    return text.strip().replace("\n", " ")[:900]
+
+
+def _fact_object(text: str) -> str:
+    compact = text.strip().replace("\n", " ")
+    return compact[:180]
+
+
 def register_default_handlers(queue: JobQueue) -> None:
     queue.register("chunk_message", chunk_message_handler)
     queue.register("chunk_tool_output", chunk_tool_output_handler)
     queue.register("extraction_gate", extraction_gate_handler)
     queue.register("embed_chunks", embed_chunks_handler)
+    queue.register("siqueira.sync_turn", sync_turn_handler)
+    queue.register("siqueira.extract_turn_memory", extract_turn_memory_handler)
