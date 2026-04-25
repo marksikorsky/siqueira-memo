@@ -589,6 +589,20 @@ def _looks_useful_for_structured_memory(text: str) -> bool:
         "auth",
         "tax",
         "crypto",
+        # Useful-link/project-analysis turns: Mark often sends a repo/paper and
+        # expects the resulting architecture/risk/TODO analysis to become memory.
+        "github.com/",
+        "arxiv.org/",
+        "архитектура",
+        "architecture",
+        "implementation",
+        "roadmap",
+        "todo",
+        "вердикт",
+        "использовать стоит",
+        "research layer",
+        "source-backed",
+        "conflict scan",
     )
     return len(text.strip()) >= 40 and any(marker in lowered for marker in markers)
 
@@ -609,6 +623,13 @@ def _looks_like_decision(text: str) -> bool:
             "policy",
             "use ",
             "включаем",
+            "вердикт",
+            "использовать стоит",
+            "архитектура",
+            "architecture",
+            "research layer",
+            "should use",
+            "must run",
         )
     )
 

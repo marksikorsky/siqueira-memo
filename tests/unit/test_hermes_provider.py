@@ -159,6 +159,33 @@ async def test_sync_turn_handler_persists_redacted_messages_chunks_and_memory(pr
 
 
 @pytest.mark.asyncio
+async def test_sync_turn_promotes_useful_link_based_architecture_analysis(provider):
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+
+    prov.sync_turn(
+        "https://github.com/example/research-system\nhttps://arxiv.org/abs/2601.00001\nИзучи, можно ли использовать в нашем проекте?",
+        "Вердикт: использовать стоит как отдельный research layer. Архитектура: добавить background worker, curated read-only tools, source-backed claims, conflict scan, and avoid unsafe local exec.",
+        session_id="s-link-analysis",
+    )
+    drained = await queue.drain()
+    assert drained >= 3
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        decisions = (
+            await session.execute(
+                select(Decision)
+                .where(Decision.profile_id == prov._profile_id)  # noqa: SLF001
+                .where(Decision.decision.ilike("%research layer%"))
+            )
+        ).scalars().all()
+        assert decisions
+
+
+@pytest.mark.asyncio
 async def test_queue_prefetch_warms_context_cache(provider):
     prov, _settings, queue = provider
     register_default_handlers(queue)
