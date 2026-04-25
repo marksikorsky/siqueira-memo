@@ -51,8 +51,18 @@ def test_tool_schemas_are_siqueira_prefixed():
 
 def test_tool_schemas_are_strict():
     for tool in tool_schemas():
-        assert tool["input_schema"]["type"] == "object"
-        assert tool["input_schema"].get("additionalProperties") is False
+        assert tool["parameters"]["type"] == "object"
+        assert tool["parameters"].get("additionalProperties") is False
+        # Hermes MemoryProvider expects OpenAI-style `parameters`; keep
+        # `input_schema` as a compatibility alias only.
+        assert tool["input_schema"] == tool["parameters"]
+
+
+def test_remember_tool_schema_exposes_required_arguments():
+    remember = next(t for t in tool_schemas() if t["name"] == "siqueira_memory_remember")
+    assert remember["parameters"]["required"] == ["kind", "statement"]
+    assert "kind" in remember["parameters"]["properties"]
+    assert "statement" in remember["parameters"]["properties"]
 
 
 @pytest.mark.asyncio

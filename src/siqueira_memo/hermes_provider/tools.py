@@ -20,7 +20,15 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
     }
     if required:
         schema["required"] = required
-    return {"name": name, "description": description, "input_schema": schema}
+    # Hermes MemoryProvider expects OpenAI-style `parameters`. Keep
+    # `input_schema` as a compatibility alias for adapters that use Anthropic's
+    # native tool schema naming.
+    return {
+        "name": name,
+        "description": description,
+        "parameters": schema,
+        "input_schema": schema,
+    }
 
 
 def tool_schemas() -> list[dict[str, Any]]:
