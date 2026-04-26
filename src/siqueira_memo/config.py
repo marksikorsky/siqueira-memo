@@ -140,6 +140,9 @@ def settings_for_tests(**overrides: object) -> Settings:
         "reranker_provider": "mock",
         "api_token": SecretStr("test-token"),
         "log_level": "WARNING",
+        "memory_capture_llm_enabled": False,
+        "memory_capture_llm_base_url": "",
+        "memory_capture_llm_api_key": SecretStr(""),
     }
     defaults.update(overrides)
     # Clear possible stale env so overrides win.

@@ -447,6 +447,7 @@ class SiqueiraMemoProvider:
                     "profile_id": self._profile_id,
                     "session_id": self._session_id,
                     "message_count": message_count,
+                    "transcript_tail": _compact_messages_for_memory(messages),
                 },
                 priority=1,
             )
@@ -462,6 +463,7 @@ class SiqueiraMemoProvider:
                 payload={
                     "profile_id": self._profile_id,
                     "session_id": self._session_id,
+                    "transcript_tail": _compact_messages_for_memory(messages),
                 },
                 priority=2,
             )
@@ -561,6 +563,48 @@ def _parse_dt(value: Any) -> Any:
         except ValueError:
             return None
     return None
+
+
+def _compact_messages_for_memory(
+    messages: list[dict[str, Any]] | Any,
+    *,
+    limit: int = 80,
+    content_limit: int = 4000,
+) -> list[dict[str, Any]]:
+    """Return a JSON-safe tail of messages for compression/session-end capture.
+
+    Hermes compaction can interrupt a long, tool-heavy session before the usual
+    completed-turn path has persisted enough context. Keep this small and let
+    the worker perform redaction before durable storage.
+    """
+    if not isinstance(messages, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for item in messages[-limit:]:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "unknown")
+        content = item.get("content")
+        if content is None:
+            content_text = ""
+        elif isinstance(content, str):
+            content_text = content
+        else:
+            try:
+                import json
+
+                content_text = json.dumps(content, ensure_ascii=False)
+            except TypeError:
+                content_text = str(content)
+        if not content_text and item.get("tool_calls"):
+            try:
+                import json
+
+                content_text = json.dumps(item.get("tool_calls"), ensure_ascii=False)
+            except TypeError:
+                content_text = str(item.get("tool_calls"))
+        compact.append({"role": role, "content": content_text[:content_limit]})
+    return compact
 
 
 class _ProviderLoopRunner:

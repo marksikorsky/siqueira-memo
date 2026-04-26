@@ -275,8 +275,15 @@ async def test_sync_turn_respects_llm_classifier_ignore(provider, monkeypatch):
         decisions = (
             await session.execute(select(Decision).where(Decision.profile_id == prov._profile_id))  # noqa: SLF001
         ).scalars().all()
+        audit_events = (
+            await session.execute(
+                select(MemoryEvent).where(MemoryEvent.event_type == "capture_classifier_skip")
+            )
+        ).scalars().all()
         assert not facts
         assert not decisions
+        assert audit_events
+        assert audit_events[0].payload["reason"] == "Casual acknowledgement/no durable content."
 
 
 @pytest.mark.asyncio
@@ -406,6 +413,49 @@ async def test_on_pre_compress_records_hook_event(provider):
 
 
 @pytest.mark.asyncio
+async def test_on_pre_compress_persists_redacted_transcript_summary(provider):
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+
+    prov.on_pre_compress(
+        [
+            {"role": "user", "content": "надо сохранить Tail compaction secret sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+            {
+                "role": "assistant",
+                "content": "Решение: при compaction сохранять transcript tail, tool results и summary.",
+            },
+            {"role": "tool", "content": "Adapter health OK at https://shella.app/health"},
+        ]
+    )
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        events = (
+            await session.execute(
+                select(MemoryEvent).where(MemoryEvent.event_type == "pre_compress_extract")
+            )
+        ).scalars().all()
+        assert events
+        payload = events[0].payload
+        assert payload["transcript_tail_count"] == 3
+        tail_text = json.dumps(payload["transcript_tail"], ensure_ascii=False)
+        assert "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" not in tail_text
+        assert "shella.app/health" in tail_text
+
+        summaries = (
+            await session.execute(
+                select(SessionSummary).where(SessionSummary.session_id == "test-session")
+            )
+        ).scalars().all()
+        assert summaries
+        assert "compaction transcript tail" in summaries[0].summary_short.lower()
+        assert "shella.app/health" in summaries[0].summary_long
+
+
+@pytest.mark.asyncio
 async def test_on_session_end_creates_session_summary(provider):
     prov, settings, queue = provider
     register_default_handlers(queue)
@@ -423,6 +473,35 @@ async def test_on_session_end_creates_session_summary(provider):
             )
         ).scalars().all()
         assert summaries
+
+
+@pytest.mark.asyncio
+async def test_on_session_end_uses_supplied_messages_when_db_session_empty(provider):
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+
+    prov.on_session_end(
+        [
+            {"role": "user", "content": "Проверь почему giant session under-captured."},
+            {
+                "role": "assistant",
+                "content": "Диагноз: sync_turn не видит tool-heavy work; нужен compression transcript capture.",
+            },
+        ]
+    )
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        summaries = (
+            await session.execute(
+                select(SessionSummary).where(SessionSummary.session_id == "test-session")
+            )
+        ).scalars().all()
+        assert summaries
+        assert "tool-heavy work" in summaries[0].summary_long
 
 
 def test_is_hermes_auxiliary_compaction():

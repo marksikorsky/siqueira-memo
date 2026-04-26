@@ -48,6 +48,7 @@ from siqueira_memo.services.memory_capture_classifier import (
     MemoryCaptureDecision,
     classify_turn_memory,
 )
+from siqueira_memo.services.redaction_service import RedactionService
 from siqueira_memo.services.retrieval_service import RetrievalService
 from siqueira_memo.services.scope_classifier import classify_memory_scope
 from siqueira_memo.workers.queue import Job, JobQueue, get_default_queue
@@ -360,13 +361,38 @@ async def delegation_observed_handler(payload: dict[str, Any]) -> None:
         await session.commit()
 
 
+def _redact_transcript_tail(raw_tail: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_tail, list):
+        return []
+    redactor = RedactionService()
+    out: list[dict[str, str]] = []
+    for item in raw_tail:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "unknown")
+        content = str(item.get("content") or "")
+        if not content.strip():
+            continue
+        out.append({"role": role, "content": redactor.redact(content).redacted})
+    return out
+
+
+def _transcript_preview(transcript_tail: list[dict[str, str]]) -> str:
+    return "\n".join(
+        f"{item.get('role', 'unknown')}: {item.get('content', '')}" for item in transcript_tail
+    )
+
+
 async def pre_compress_extract_handler(payload: dict[str, Any]) -> None:
     ctx = JobContext.default()
     factory = get_session_factory(ctx.settings)
     profile_id = str(payload["profile_id"])
     session_id = str(payload.get("session_id") or "")
+    transcript_tail = _redact_transcript_tail(payload.get("transcript_tail") or [])
+    summary_text = _transcript_preview(transcript_tail)
     async with factory() as session:
-        await IngestService(profile_id=profile_id).ingest_event(
+        ingest = IngestService(profile_id=profile_id)
+        result = await ingest.ingest_event(
             session,
             GenericEventIn(
                 profile_id=profile_id,
@@ -378,9 +404,27 @@ async def pre_compress_extract_handler(payload: dict[str, Any]) -> None:
                 payload={
                     "event_type": "pre_compress_extract",
                     "message_count": payload.get("message_count", 0),
+                    "transcript_tail_count": len(transcript_tail),
+                    "transcript_tail": transcript_tail,
                 },
             ),
         )
+        if transcript_tail:
+            session.add(
+                SessionSummary(
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    summary_short=(
+                        f"Compaction transcript tail captured {len(transcript_tail)} messages: "
+                        f"{summary_text[:420]}"
+                    ),
+                    summary_long=summary_text,
+                    source_event_ids=[result.event_id],
+                    model="heuristic",
+                    model_version="compaction-tail-v1",
+                    prompt_version="v1",
+                )
+            )
         await session.commit()
 
 
@@ -397,7 +441,11 @@ async def session_end_summarise_handler(payload: dict[str, Any]) -> None:
                 .order_by(Message.created_at.asc())
             )
         ).scalars().all()
-        preview = "\n".join(f"{m.role}: {m.content_redacted}" for m in rows)[-2000:]
+        transcript_tail = _redact_transcript_tail(payload.get("transcript_tail") or [])
+        if rows:
+            preview = "\n".join(f"{m.role}: {m.content_redacted}" for m in rows)[-2000:]
+        else:
+            preview = _transcript_preview(transcript_tail)[-2000:]
         event_id = uuid.uuid4()
         session.add(
             MemoryEvent(
@@ -536,6 +584,27 @@ async def extract_turn_memory_handler(payload: dict[str, Any]) -> None:
     )
     if llm_capture is not None:
         if not llm_capture.save:
+            factory = get_session_factory(ctx.settings)
+            async with factory() as session:
+                await IngestService(profile_id=profile_id).ingest_event(
+                    session,
+                    GenericEventIn(
+                        profile_id=profile_id,
+                        session_id=session_id,
+                        event_type="capture_classifier_skip",
+                        source="memory_capture_classifier",
+                        actor="siqueira-capture",
+                        agent_context="primary",
+                        payload={
+                            "event_type": "capture_classifier_skip",
+                            "reason": llm_capture.rationale,
+                            "confidence": llm_capture.confidence,
+                            "source_event_ids": [str(x) for x in source_event_ids],
+                            "source_message_ids": [str(x) for x in source_message_ids],
+                        },
+                    ),
+                )
+                await session.commit()
             return
         capture = llm_capture
         model_provider = "openai-compatible"

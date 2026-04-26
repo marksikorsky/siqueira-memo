@@ -37,6 +37,20 @@ async def test_importer_from_jsonl(tmp_path, db, session, queue):
     assert [m.source for m in messages] == [MESSAGE_SOURCE_HERMES_SESSION_IMPORT] * 2
 
 
+def test_iter_jsonl_uses_filename_session_id_when_rows_omit_it(tmp_path):
+    path = tmp_path / "20260426_072220_89fd3a.jsonl"
+    rows = [
+        {"role": "user", "content": "continue adapter work"},
+        {"role": "tool", "content": "curl returned health OK"},
+    ]
+    path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    imported = list(iter_jsonl(path))
+
+    assert [m.session_id for m in imported] == ["20260426_072220_89fd3a"] * 2
+    assert [m.role for m in imported] == ["user", "tool"]
+
+
 @pytest.mark.asyncio
 async def test_importer_from_sqlite(tmp_path, db, session, queue):
     db_path = tmp_path / "hermes.sqlite"

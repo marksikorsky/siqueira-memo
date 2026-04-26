@@ -48,6 +48,7 @@ class ImportedMessage:
 
 
 def iter_jsonl(path: Path) -> Iterator[ImportedMessage]:
+    default_session_id = _default_session_id_from_path(path)
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             stripped = line.strip()
@@ -58,7 +59,7 @@ def iter_jsonl(path: Path) -> Iterator[ImportedMessage]:
             except json.JSONDecodeError:
                 log.warning("hermes_session.bad_jsonl_line")
                 continue
-            yield _row_to_message(doc)
+            yield _row_to_message(doc, default_session_id=default_session_id)
 
 
 def iter_sqlite(path: Path) -> Iterator[ImportedMessage]:
@@ -84,7 +85,12 @@ def iter_sqlite(path: Path) -> Iterator[ImportedMessage]:
         conn.close()
 
 
-def _row_to_message(doc: dict[str, Any]) -> ImportedMessage:
+def _default_session_id_from_path(path: Path) -> str:
+    stem = path.stem
+    return stem.removeprefix("session_") or "imported"
+
+
+def _row_to_message(doc: dict[str, Any], *, default_session_id: str = "imported") -> ImportedMessage:
     created = doc.get("created_at")
     if isinstance(created, (int, float)):
         created_dt: datetime | None = datetime.fromtimestamp(created, tz=UTC)
@@ -102,7 +108,7 @@ def _row_to_message(doc: dict[str, Any]) -> ImportedMessage:
         except json.JSONDecodeError:
             metadata = {"raw": metadata}
     return ImportedMessage(
-        session_id=str(doc.get("session_id", "imported")),
+        session_id=str(doc.get("session_id") or default_session_id),
         role=str(doc.get("role", ROLE_USER)),
         content=str(doc.get("content", "")),
         created_at=created_dt,
