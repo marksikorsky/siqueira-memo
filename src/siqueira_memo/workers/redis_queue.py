@@ -10,7 +10,7 @@ cross-process delivery.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 
 from siqueira_memo.config import get_settings
 from siqueira_memo.logging import get_logger
@@ -71,7 +71,7 @@ class RedisJobQueue:
     async def drain(self) -> int:
         count = 0
         while True:
-            raw = self._redis.lpop(self.queue_key)
+            raw = cast(bytes | str | None, self._redis.lpop(self.queue_key))
             if raw is None:
                 return count
             try:
@@ -93,7 +93,7 @@ class RedisJobQueue:
                 self._release_dedup(job)
 
     def pending(self) -> int:
-        return int(self._redis.llen(self.queue_key))
+        return int(cast(int, self._redis.llen(self.queue_key)))
 
     def clear(self) -> None:
         self._redis.delete(self.queue_key)

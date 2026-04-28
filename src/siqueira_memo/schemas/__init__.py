@@ -39,6 +39,11 @@ from siqueira_memo.schemas.memory import (
     TimelineRequest,
     TimelineResponse,
 )
+from siqueira_memo.schemas.memory_capture import (
+    MemoryCandidate,
+    MemoryCaptureResult,
+    MemoryRelationCandidate,
+)
 from siqueira_memo.schemas.recall import (
     ConflictEntry,
     ContextPack,
@@ -71,6 +76,9 @@ __all__ = [
     "HealthStatus",
     "HermesAuxCompactionIn",
     "MemoBase",
+    "MemoryCandidate",
+    "MemoryCaptureResult",
+    "MemoryRelationCandidate",
     "MessageIngestIn",
     "MessageIngestOut",
     "RecallChunk",

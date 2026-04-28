@@ -24,6 +24,7 @@ from siqueira_memo.schemas.recall import (
     RecallFact,
     RecallSummary,
 )
+from siqueira_memo.services.redaction_service import redact
 
 
 @dataclass
@@ -65,6 +66,12 @@ class ContextPackShaper:
     def _trim_to_budget(self, pack: ContextPack, budget_tokens: int) -> ContextPack:
         assert self.settings is not None
         out = copy.deepcopy(pack)
+        secret_count = _drop_secret_records(out)
+        if secret_count:
+            out.warnings = [
+                *out.warnings,
+                f"{secret_count} secret item(s) excluded from prompt prefetch",
+            ]
         max_snippets = self.settings.prefetch_max_source_snippets
         out.source_snippets = list(out.source_snippets)[:max_snippets]
 
@@ -106,6 +113,40 @@ class ContextPackShaper:
         if total >= budget_tokens:
             out.warnings = [*out.warnings, "prefetch budget reached; call recall for more"]
         return out
+
+
+def _drop_secret_records(pack: ContextPack) -> int:
+    original_count = len(pack.decisions) + len(pack.facts) + len(pack.chunks) + len(pack.source_snippets)
+    pack.decisions = [d for d in pack.decisions if d.sensitivity != "secret" and not d.secret_masked]
+    pack.facts = [f for f in pack.facts if f.sensitivity != "secret" and not f.secret_masked]
+    pack.chunks = [c for c in pack.chunks if c.sensitivity not in {"secret", "sensitive"}]
+    pack.source_snippets = [s for s in pack.source_snippets if not _looks_sensitive(s.snippet or "")]
+    pack.answer_context = _safe_answer_context(pack)
+    new_count = len(pack.decisions) + len(pack.facts) + len(pack.chunks) + len(pack.source_snippets)
+    return max(0, original_count - new_count)
+
+
+def _safe_answer_context(pack: ContextPack) -> str:
+    parts: list[str] = []
+    active_decisions = [d for d in pack.decisions if d.status == "active"]
+    if active_decisions:
+        parts.append(
+            "Active decisions:\n"
+            + "\n".join(f"- {redact(d.decision).redacted}" for d in active_decisions[:5])
+        )
+    active_facts = [f for f in pack.facts if f.status == "active"]
+    if active_facts:
+        parts.append(
+            "Known facts:\n"
+            + "\n".join(f"- {redact(f.statement).redacted}" for f in active_facts[:5])
+        )
+    if pack.summaries:
+        parts.append("Recent summary: " + redact(pack.summaries[0].summary_short).redacted)
+    return "\n\n".join(parts)
+
+
+def _looks_sensitive(text: str) -> bool:
+    return redact(text).matches > 0
 
 
 def _rough_tokens(text: str) -> int:

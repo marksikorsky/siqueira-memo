@@ -287,6 +287,209 @@ async def test_sync_turn_respects_llm_classifier_ignore(provider, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sync_turn_persists_multiple_llm_candidates_and_audits(provider, monkeypatch):
+    import siqueira_memo.workers.jobs as jobs
+    from siqueira_memo.schemas.memory_capture import MemoryCandidate, MemoryCaptureResult
+
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+    set_worker_settings(settings.model_copy(update={"memory_capture_llm_enabled": True}))
+
+    monkeypatch.setattr(
+        jobs,
+        "classify_turn_memory",
+        lambda *_args, **_kwargs: MemoryCaptureResult(
+            classifier_model="test-capture-model",
+            prompt_version="capture-v2-test",
+            candidates=[
+                MemoryCandidate(
+                    action="auto_save",
+                    kind="fact",
+                    statement="Amber-17 is Mark's cold standby host at 10.44.0.17.",
+                    subject="amber-17",
+                    predicate="role",
+                    object="cold standby host at 10.44.0.17",
+                    project="infrastructure",
+                    topic="servers",
+                    confidence=0.94,
+                    importance=0.92,
+                    rationale="Stable host inventory.",
+                ),
+                MemoryCandidate(
+                    action="auto_save",
+                    kind="decision",
+                    statement="Use source-backed capture audit before expanding retrieval fusion.",
+                    project="siqueira-memo",
+                    topic="roadmap",
+                    confidence=0.91,
+                    importance=0.9,
+                    rationale="Explicit roadmap ordering.",
+                ),
+                MemoryCandidate(
+                    action="skip_noise",
+                    kind="fact",
+                    statement="Assistant acknowledged the instruction.",
+                    confidence=0.8,
+                    importance=0.1,
+                    rationale="No durable content.",
+                ),
+            ],
+        ),
+    )
+
+    prov.sync_turn(
+        "Запомни: amber-17 — cold standby. Решение: сначала capture audit.",
+        "Принял.",
+        session_id="s-multi-candidate",
+    )
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        facts = (
+            await session.execute(
+                select(Fact)
+                .where(Fact.profile_id == prov._profile_id)  # noqa: SLF001
+                .where(Fact.statement.ilike("%Amber-17%"))
+            )
+        ).scalars().all()
+        decisions = (
+            await session.execute(
+                select(Decision)
+                .where(Decision.profile_id == prov._profile_id)  # noqa: SLF001
+                .where(Decision.decision.ilike("%capture audit%"))
+            )
+        ).scalars().all()
+        audit_events = (
+            await session.execute(
+                select(MemoryEvent).where(
+                    MemoryEvent.session_id == "s-multi-candidate",
+                    MemoryEvent.event_type.in_(
+                        [
+                            "capture_classifier_called",
+                            "capture_candidates_extracted",
+                            "capture_candidate_auto_saved",
+                            "capture_classifier_skip",
+                        ]
+                    ),
+                )
+            )
+        ).scalars().all()
+
+        assert facts
+        assert decisions
+        assert any(e.event_type == "capture_candidates_extracted" and e.payload["candidate_count"] == 3 for e in audit_events)
+        assert sum(1 for e in audit_events if e.event_type == "capture_candidate_auto_saved") == 2
+        assert any(e.event_type == "capture_classifier_skip" for e in audit_events)
+
+
+@pytest.mark.asyncio
+async def test_sync_turn_secret_candidate_is_tagged_redacted_and_not_dropped(provider, monkeypatch):
+    import siqueira_memo.workers.jobs as jobs
+    from siqueira_memo.schemas.memory_capture import MemoryCandidate, MemoryCaptureResult
+
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+    set_worker_settings(settings.model_copy(update={"memory_capture_llm_enabled": True}))
+
+    raw_secret = "sk-proj-" + "a" * 40
+    monkeypatch.setattr(
+        jobs,
+        "classify_turn_memory",
+        lambda *_args, **_kwargs: MemoryCaptureResult(
+            classifier_model="test-capture-model",
+            prompt_version="capture-v2-test",
+            candidates=[
+                MemoryCandidate(
+                    action="auto_save",
+                    kind="secret",
+                    statement=f"OpenAI key for staging tests is {raw_secret}.",
+                    subject="OpenAI staging key",
+                    predicate="stored_as_secret",
+                    object="staging tests credential",
+                    project="siqueira-memo",
+                    topic="secrets",
+                    confidence=0.96,
+                    importance=0.85,
+                    sensitivity="secret",
+                    risk="high",
+                    rationale="Operational credential; store masked until explicit secret policy lands.",
+                )
+            ],
+        ),
+    )
+
+    prov.sync_turn("Запомни staging OpenAI key", "Сохранил masked.", session_id="s-secret-candidate")
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        facts = (
+            await session.execute(
+                select(Fact)
+                .where(Fact.profile_id == prov._profile_id)  # noqa: SLF001
+                .where(Fact.topic == "secrets")
+            )
+        ).scalars().all()
+        secret_audit_events = (
+            await session.execute(
+                select(MemoryEvent).where(
+                    MemoryEvent.session_id == "s-secret-candidate",
+                    MemoryEvent.event_type == "capture_secret_candidate_saved",
+                )
+            )
+        ).scalars().all()
+
+        assert facts
+        assert facts[0].extra_metadata["capture_kind"] == "secret"
+        assert facts[0].extra_metadata["sensitivity"] == "secret"
+        assert raw_secret not in facts[0].statement
+        assert "[SECRET_REF:" in facts[0].statement
+        assert secret_audit_events
+
+
+@pytest.mark.asyncio
+async def test_sync_turn_audits_llm_fallback_when_classifier_returns_none(provider, monkeypatch):
+    import siqueira_memo.workers.jobs as jobs
+
+    prov, settings, queue = provider
+    register_default_handlers(queue)
+    set_worker_settings(settings.model_copy(update={"memory_capture_llm_enabled": True}))
+    monkeypatch.setattr(jobs, "classify_turn_memory", lambda *_args, **_kwargs: None)
+
+    prov.sync_turn(
+        "Решение: fallback audit должен сохраняться при отказе classifier.",
+        "Ок.",
+        session_id="s-fallback-audit",
+    )
+    await queue.drain()
+
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        decisions = (
+            await session.execute(select(Decision).where(Decision.profile_id == prov._profile_id))  # noqa: SLF001
+        ).scalars().all()
+        fallback_events = (
+            await session.execute(
+                select(MemoryEvent).where(
+                    MemoryEvent.session_id == "s-fallback-audit",
+                    MemoryEvent.event_type == "capture_classifier_fallback",
+                )
+            )
+        ).scalars().all()
+
+        assert decisions
+        assert fallback_events
+        assert fallback_events[0].payload["fallback_reason"] == "classifier_unavailable_or_failed"
+
+
+@pytest.mark.asyncio
 async def test_sync_turn_promotes_tailscale_server_inventory(provider):
     prov, settings, queue = provider
     register_default_handlers(queue)

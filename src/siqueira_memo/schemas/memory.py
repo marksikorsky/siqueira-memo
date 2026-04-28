@@ -111,3 +111,49 @@ class SourcesRequest(MemoBase):
 
 class SourcesResponse(MemoBase):
     sources: list[SourceRef]
+
+
+RelationshipNodeType = Literal["fact", "decision", "entity", "summary", "message"]
+RelationshipDirection = Literal["incoming", "outgoing", "both"]
+
+
+class MemoryRelationshipCreateRequest(MemoBase):
+    profile_id: str | None = None
+    source_type: RelationshipNodeType
+    source_id: uuid.UUID
+    relationship_type: str
+    target_type: RelationshipNodeType
+    target_id: uuid.UUID
+    confidence: float = 1.0
+    rationale: str | None = None
+    source_event_ids: list[uuid.UUID] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryRelationshipListRequest(MemoBase):
+    profile_id: str | None = None
+    target_type: RelationshipNodeType
+    target_id: uuid.UUID
+    direction: RelationshipDirection = "both"
+    include_inactive: bool = False
+    limit: int = 100
+
+
+class MemoryRelationshipItem(MemoBase):
+    id: uuid.UUID
+    profile_id: str
+    source_type: str
+    source_id: uuid.UUID
+    relationship_type: str
+    target_type: str
+    target_id: uuid.UUID
+    confidence: float
+    rationale: str | None = None
+    source_event_ids: list[uuid.UUID] = Field(default_factory=list)
+    created_by: str
+    status: str
+    created_at: datetime
+
+
+class MemoryRelationshipListResponse(MemoBase):
+    relationships: list[MemoryRelationshipItem]

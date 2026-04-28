@@ -23,6 +23,7 @@ from siqueira_memo.models.constants import (
     CONFLICT_STATUS_OPEN,
     STATUS_ACTIVE,
 )
+from siqueira_memo.services.secret_policy import is_secret_metadata, masked_preview
 
 
 @dataclass
@@ -44,9 +45,12 @@ async def export_markdown(
         sections.append("## Active decisions")
         for d in decisions:
             sections.append(f"### {d.topic}")
-            sections.append(d.decision)
+            if is_secret_metadata(d.extra_metadata):
+                sections.append(masked_preview(d.decision, d.extra_metadata) + " _(secret masked)_")
+            else:
+                sections.append(d.decision)
             if d.rationale:
-                sections.append(f"*Rationale:* {d.rationale}")
+                sections.append(f"*Rationale:* {masked_preview(d.rationale, d.extra_metadata) if is_secret_metadata(d.extra_metadata) else d.rationale}")
             sections.append(
                 f"*Status:* {d.status} · *Decided at:* {d.decided_at.isoformat()}"
             )
@@ -56,6 +60,10 @@ async def export_markdown(
     if facts:
         sections.append("## Active facts")
         for f in facts:
+            if is_secret_metadata(f.extra_metadata):
+                preview = masked_preview(f.statement, f.extra_metadata)
+                sections.append(f"- **{f.subject} · {f.predicate}** → {preview} _(secret masked)_")
+                continue
             sections.append(f"- **{f.subject} · {f.predicate}** → {f.object}")
             if f.statement:
                 sections.append(f"  - {f.statement}")

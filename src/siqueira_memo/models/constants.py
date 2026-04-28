@@ -152,6 +152,36 @@ ALL_RECALL_MODES: Final[frozenset[str]] = frozenset(
 )
 
 
+# Relationship types (roadmap Phase 4)
+RELATIONSHIP_CONFIRMS: Final = "confirms"
+RELATIONSHIP_CONTRADICTS: Final = "contradicts"
+RELATIONSHIP_UPDATES: Final = "updates"
+RELATIONSHIP_REPLACES: Final = "replaces"
+RELATIONSHIP_DERIVED_FROM: Final = "derived_from"
+RELATIONSHIP_DEPENDS_ON: Final = "depends_on"
+RELATIONSHIP_SAME_AS: Final = "same_as"
+RELATIONSHIP_RELATED_TO: Final = "related_to"
+RELATIONSHIP_SUPERSEDES: Final = "supersedes"
+RELATIONSHIP_INVALIDATES: Final = "invalidates"
+RELATIONSHIP_USES_SECRET: Final = "uses_secret"
+RELATIONSHIP_BELONGS_TO_ENTITY: Final = "belongs_to_entity"
+ALL_RELATIONSHIP_TYPES: Final[frozenset[str]] = frozenset(
+    {
+        RELATIONSHIP_CONFIRMS,
+        RELATIONSHIP_CONTRADICTS,
+        RELATIONSHIP_UPDATES,
+        RELATIONSHIP_REPLACES,
+        RELATIONSHIP_DERIVED_FROM,
+        RELATIONSHIP_DEPENDS_ON,
+        RELATIONSHIP_SAME_AS,
+        RELATIONSHIP_RELATED_TO,
+        RELATIONSHIP_SUPERSEDES,
+        RELATIONSHIP_INVALIDATES,
+        RELATIONSHIP_USES_SECRET,
+        RELATIONSHIP_BELONGS_TO_ENTITY,
+    }
+)
+
 # Conflict statuses (plan §21.6)
 CONFLICT_STATUS_OPEN: Final = "open"
 CONFLICT_STATUS_AUTO_RESOLVED: Final = "auto_resolved"

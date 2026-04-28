@@ -33,9 +33,11 @@ from siqueira_memo.models.constants import (
     CONFLICT_STATUS_OPEN,
     EVENT_TYPE_DECISION_SUPERSEDED,
     EVENT_TYPE_FACT_INVALIDATED,
+    RELATIONSHIP_CONTRADICTS,
     STATUS_ACTIVE,
     STATUS_SUPERSEDED,
 )
+from siqueira_memo.services.relationship_service import RelationshipService
 from siqueira_memo.utils.canonical import normalize_text
 
 log = get_logger(__name__)
@@ -76,6 +78,7 @@ class ConflictService:
                 if existing.confidence < pair.confidence:
                     existing.confidence = pair.confidence
                 persisted.append(existing)
+                await self._ensure_contradicts_relationship(session, pair)
                 continue
             row = MemoryConflict(
                 id=uuid.uuid4(),
@@ -93,6 +96,7 @@ class ConflictService:
             )
             session.add(row)
             persisted.append(row)
+            await self._ensure_contradicts_relationship(session, pair)
 
         await session.flush()
         log.info(
@@ -104,6 +108,21 @@ class ConflictService:
             },
         )
         return persisted
+
+    async def _ensure_contradicts_relationship(
+        self, session: AsyncSession, pair: _CandidatePair
+    ) -> None:
+        await RelationshipService(profile_id=self.profile_id, actor="conflict_service").create(
+            session,
+            source_type=pair.right_type,
+            source_id=pair.right_id,
+            relationship_type=RELATIONSHIP_CONTRADICTS,
+            target_type=pair.left_type,
+            target_id=pair.left_id,
+            confidence=pair.confidence,
+            rationale=pair.hint,
+            metadata={"detector": pair.detector, "conflict_type": pair.conflict_type},
+        )
 
     async def _existing_conflict(
         self, session: AsyncSession, pair: _CandidatePair

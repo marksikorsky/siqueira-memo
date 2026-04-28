@@ -13,6 +13,7 @@ from siqueira_memo.models import (
     DecisionSource,
     Fact,
     FactSource,
+    MemoryRelationship,
     SessionSummary,
     TopicSummary,
 )
@@ -22,6 +23,10 @@ from siqueira_memo.schemas.memory import (
     CorrectResponse,
     ForgetRequest,
     ForgetResponse,
+    MemoryRelationshipCreateRequest,
+    MemoryRelationshipItem,
+    MemoryRelationshipListRequest,
+    MemoryRelationshipListResponse,
     RememberRequest,
     RememberResponse,
     SourcesRequest,
@@ -32,8 +37,27 @@ from siqueira_memo.schemas.memory import (
 )
 from siqueira_memo.services.deletion_service import DeletionService
 from siqueira_memo.services.extraction_service import ExtractionService
+from siqueira_memo.services.relationship_service import RelationshipService
 
 router = APIRouter(prefix="/v1/memory")
+
+
+def _relationship_item(row: MemoryRelationship) -> MemoryRelationshipItem:
+    return MemoryRelationshipItem(
+        id=row.id,
+        profile_id=row.profile_id,
+        source_type=row.source_type,
+        source_id=row.source_id,
+        relationship_type=row.relationship_type,
+        target_type=row.target_type,
+        target_id=row.target_id,
+        confidence=float(row.confidence or 0.0),
+        rationale=row.rationale,
+        source_event_ids=list(row.source_event_ids or []),
+        created_by=row.created_by,
+        status=row.status,
+        created_at=row.created_at,
+    )
 
 
 @router.post("/remember", response_model=RememberResponse)
@@ -70,6 +94,54 @@ async def forget(
 ) -> ForgetResponse:
     svc = DeletionService(profile_id=profile_id)
     return await svc.forget(session, payload)
+
+
+@router.post("/relationships/create", response_model=MemoryRelationshipItem)
+async def create_relationship(
+    payload: MemoryRelationshipCreateRequest,
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+) -> MemoryRelationshipItem:
+    svc = RelationshipService(profile_id=payload.profile_id or profile_id, actor="api")
+    try:
+        row = await svc.create(
+            session,
+            source_type=payload.source_type,
+            source_id=payload.source_id,
+            relationship_type=payload.relationship_type,
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            confidence=payload.confidence,
+            rationale=payload.rationale,
+            source_event_ids=payload.source_event_ids,
+            metadata=payload.metadata,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return _relationship_item(row)
+
+
+@router.post("/relationships/list", response_model=MemoryRelationshipListResponse)
+async def list_relationships(
+    payload: MemoryRelationshipListRequest,
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+) -> MemoryRelationshipListResponse:
+    svc = RelationshipService(profile_id=payload.profile_id or profile_id, actor="api")
+    try:
+        rows = await svc.list_for_memory(
+            session,
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            direction=payload.direction,
+            include_inactive=payload.include_inactive,
+            limit=payload.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return MemoryRelationshipListResponse(relationships=[_relationship_item(row) for row in rows])
 
 
 @router.post("/timeline", response_model=TimelineResponse)

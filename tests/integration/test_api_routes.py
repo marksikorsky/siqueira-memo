@@ -153,6 +153,9 @@ async def test_admin_ui_uses_form_login_instead_of_basic_auth_popup(api_client):
     assert "/v1/admin/search" in html
     assert "/v1/memory/timeline" in html
     assert "/v1/memory/sources" in html
+    assert "/v1/admin/relationships/list" in html
+    assert "Relationship Graph" in html
+    assert "relationship-badge" in html
     assert "--bg: #fbfaf8" in html
 
     logout = await client.post("/admin/logout", follow_redirects=False)
@@ -226,6 +229,30 @@ async def test_admin_projects_detail_and_export(api_client):
     assert export.headers["content-type"].startswith("text/markdown")
     assert "# Siqueira Memo Memory Export" in export.text
     assert "Siqueira UI has a project overview dashboard." in export.text
+
+    rel = await client.post(
+        "/v1/memory/relationships/create",
+        headers=auth,
+        json={
+            "source_type": "fact",
+            "source_id": fact_id,
+            "relationship_type": "related_to",
+            "target_type": "decision",
+            "target_id": decision.json()["id"],
+            "confidence": 0.88,
+            "rationale": "UI fact is related to the admin UI decision.",
+        },
+    )
+    assert rel.status_code == 200, rel.text
+    assert rel.json()["relationship_type"] == "related_to"
+
+    rels = await client.post(
+        "/v1/admin/relationships/list",
+        headers=auth,
+        json={"target_type": "fact", "target_id": fact_id},
+    )
+    assert rels.status_code == 200, rels.text
+    assert rels.json()["relationships"]
 
 
 @pytest.mark.asyncio
@@ -423,6 +450,85 @@ async def test_correct_via_api(api_client):
     body = corr.json()
     assert body["invalidated"] == [fact_id]
     assert body["replacement_id"]
+
+
+@pytest.mark.asyncio
+async def test_admin_version_diff_and_rollback(api_client):
+    client, settings = api_client
+    auth = _auth(settings)
+    first = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "fact",
+            "subject": "shannon",
+            "predicate": "primary_auth",
+            "object": "api_key",
+            "statement": "Shannon auth is API key",
+        },
+    )
+    assert first.status_code == 200, first.text
+    fact_id = first.json()["id"]
+
+    corr = await client.post(
+        "/v1/memory/correct",
+        headers=auth,
+        json={
+            "target_type": "fact",
+            "target_id": fact_id,
+            "correction_text": "actually it's the OAuth token",
+            "replacement": {
+                "kind": "fact",
+                "subject": "shannon",
+                "predicate": "primary_auth",
+                "object": "claude_oauth",
+                "statement": "Shannon auth is Claude OAuth token",
+            },
+        },
+    )
+    assert corr.status_code == 200, corr.text
+
+    diff = await client.post(
+        "/v1/admin/versions/diff",
+        headers=auth,
+        json={
+            "target_type": "fact",
+            "target_id": fact_id,
+            "from_version": 1,
+            "to_version": 2,
+        },
+    )
+    assert diff.status_code == 200, diff.text
+    diff_body = diff.json()
+    assert diff_body["target_id"] == fact_id
+    assert diff_body["changes"]["status"] == {"from": "active", "to": "superseded"}
+    assert diff_body["changes"]["superseded_by"]["to"] == corr.json()["replacement_id"]
+
+    rollback = await client.post(
+        "/v1/admin/versions/rollback",
+        headers=auth,
+        json={
+            "target_type": "fact",
+            "target_id": fact_id,
+            "to_version": 1,
+            "reason": "operator test rollback",
+        },
+    )
+    assert rollback.status_code == 200, rollback.text
+    rollback_body = rollback.json()
+    assert rollback_body["rolled_back"] is True
+    assert rollback_body["new_version"] == 3
+
+    detail = await client.post(
+        "/v1/admin/detail",
+        headers=auth,
+        json={"target_type": "fact", "target_id": fact_id},
+    )
+    assert detail.status_code == 200, detail.text
+    item = detail.json()["item"]
+    assert item["status"] == "active"
+    assert item["superseded_by"] is None
+    assert item["statement"] == "Shannon auth is API key"
 
 
 @pytest.mark.asyncio

@@ -41,6 +41,7 @@ class RecallRequest(MemoBase):
     )
     include_sources: bool = True
     include_conflicts: bool = True
+    allow_secret_recall: bool = False
     limit: int = 20
     since: datetime | None = None
     until: datetime | None = None
@@ -64,6 +65,12 @@ class RecallDecision(MemoBase):
     reversible: bool
     decided_at: datetime
     confidence: float = 0.0
+    sensitivity: str = "internal"
+    masked_preview: str | None = None
+    secret_ref: str | None = None
+    secret_masked: bool = False
+    retrieval_lane: str = "structured"
+    retrieval_explanation: str | None = None
     sources: list[SourceRef] = Field(default_factory=list)
 
 
@@ -79,6 +86,12 @@ class RecallFact(MemoBase):
     topic: str | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None
+    sensitivity: str = "internal"
+    masked_preview: str | None = None
+    secret_ref: str | None = None
+    secret_masked: bool = False
+    retrieval_lane: str = "structured"
+    retrieval_explanation: str | None = None
     sources: list[SourceRef] = Field(default_factory=list)
 
 

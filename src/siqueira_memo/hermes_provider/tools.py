@@ -46,6 +46,11 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "mode": {"type": "string", "enum": RECALL_MODES, "default": "balanced"},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 15},
                 "include_sources": {"type": "boolean", "default": True},
+                "allow_secret_recall": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Explicitly include masked secret records in recall. Raw secret values still require audited admin reveal.",
+                },
             },
             required=["query"],
         ),

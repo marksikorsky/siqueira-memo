@@ -5,14 +5,17 @@ from __future__ import annotations
 import httpx
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 
 from siqueira_memo.config import settings_for_tests
 from siqueira_memo.db import (
     create_all_for_tests,
     dispose_engines,
     drop_all_for_tests,
+    get_session_factory,
 )
 from siqueira_memo.main import create_app
+from siqueira_memo.models import MemoryEvent
 from siqueira_memo.workers.queue import MemoryJobQueue, set_default_queue
 
 
@@ -111,3 +114,60 @@ async def test_audit_endpoint_returns_metadata_only(api_client):
     for entry in events:
         assert "content" not in entry
         assert "content_raw" not in entry
+
+
+@pytest.mark.asyncio
+async def test_admin_masks_secret_detail_and_reveal_is_audited(api_client):
+    client, settings = api_client
+    auth = _auth(settings)
+    raw_secret = "sk-proj-" + "e" * 40
+    remember = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "fact",
+            "subject": "OpenAI admin key",
+            "predicate": "stored_as_secret",
+            "object": raw_secret,
+            "statement": f"OpenAI admin key is {raw_secret}.",
+            "project": "siqueira-memo",
+            "topic": "secrets",
+            "metadata": {
+                "sensitivity": "secret",
+                "masked_preview": "OpenAI admin key is sk-proj-...eeee.",
+                "secret_kind": "api_key",
+                "secret_value": raw_secret,
+            },
+        },
+    )
+    assert remember.status_code == 200, remember.text
+    fact_id = remember.json()["id"]
+
+    detail = await client.post(
+        "/v1/admin/detail",
+        headers=auth,
+        json={"target_type": "fact", "target_id": fact_id},
+    )
+    assert detail.status_code == 200, detail.text
+    detail_text = detail.text
+    assert raw_secret not in detail_text
+    assert "sk-proj-...eeee" in detail_text
+    assert detail.json()["item"]["secret_masked"] is True
+
+    reveal = await client.post(
+        "/v1/admin/secrets/reveal",
+        headers=auth,
+        json={"target_type": "fact", "target_id": fact_id, "reason": "integration-test"},
+    )
+    assert reveal.status_code == 200, reveal.text
+    assert reveal.json()["secret_value"] == raw_secret
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        audit_events = (
+            await session.execute(
+                select(MemoryEvent).where(MemoryEvent.event_type == "secret_revealed")
+            )
+        ).scalars().all()
+    assert audit_events
+    assert raw_secret not in str(audit_events[0].payload)

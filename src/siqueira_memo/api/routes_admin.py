@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Body, HTTPException, Response, status
 from sqlalchemy import func, literal, select
@@ -21,6 +22,7 @@ from siqueira_memo.models import (
     FactSource,
     MemoryConflict,
     MemoryEvent,
+    MemoryRelationship,
     Message,
     SessionSummary,
     TopicSummary,
@@ -33,13 +35,52 @@ from siqueira_memo.schemas.conflicts import (
     ConflictResolveResponse,
     ConflictScanResponse,
 )
+from siqueira_memo.schemas.ingest import GenericEventIn
+from siqueira_memo.schemas.memory import (
+    MemoryRelationshipItem,
+    MemoryRelationshipListRequest,
+    MemoryRelationshipListResponse,
+)
 from siqueira_memo.services.conflict_service import ConflictService
+from siqueira_memo.services.ingest_service import IngestService
+from siqueira_memo.services.memory_version_service import MemoryVersionService
+from siqueira_memo.services.relationship_service import RelationshipService
 from siqueira_memo.services.retention_service import AuditLog
+from siqueira_memo.services.secret_policy import (
+    is_secret_metadata,
+    masked_preview,
+    sanitize_metadata,
+    secret_ref,
+    secret_value_for_reveal,
+)
 
 router = APIRouter(prefix="/v1/admin")
 
 
 _PREVIEW = 200
+
+
+def _admin_preview(text: str, metadata: dict[str, Any] | None) -> str:
+    preview = masked_preview(text or "", metadata) if is_secret_metadata(metadata) else (text or "")
+    return preview[:_PREVIEW]
+
+
+def _relationship_item(row: MemoryRelationship) -> MemoryRelationshipItem:
+    return MemoryRelationshipItem(
+        id=row.id,
+        profile_id=row.profile_id,
+        source_type=row.source_type,
+        source_id=row.source_id,
+        relationship_type=row.relationship_type,
+        target_type=row.target_type,
+        target_id=row.target_id,
+        confidence=float(row.confidence or 0.0),
+        rationale=row.rationale,
+        source_event_ids=list(row.source_event_ids or []),
+        created_by=row.created_by,
+        status=row.status,
+        created_at=row.created_at,
+    )
 
 
 def _apply_project_scope(stmt: Any, model: type[Any], payload: AdminSearchRequest) -> Any:
@@ -52,6 +93,28 @@ def _apply_project_scope(stmt: Any, model: type[Any], payload: AdminSearchReques
     if payload.project:
         return stmt.where(model.project == payload.project)
     return stmt
+
+
+@router.post("/relationships/list", response_model=MemoryRelationshipListResponse)
+async def list_relationships(
+    payload: MemoryRelationshipListRequest,
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+) -> MemoryRelationshipListResponse:
+    svc = RelationshipService(profile_id=payload.profile_id or profile_id, actor="admin_api")
+    try:
+        rows = await svc.list_for_memory(
+            session,
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            direction=payload.direction,
+            include_inactive=payload.include_inactive,
+            limit=payload.limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return MemoryRelationshipListResponse(relationships=[_relationship_item(row) for row in rows])
 
 
 @router.post("/search", response_model=AdminSearchResponse)
@@ -119,7 +182,7 @@ async def search(
                 AdminSearchHit(
                     id=f.id,
                     target_type="fact",
-                    preview=(f.statement or "")[:_PREVIEW],
+                    preview=_admin_preview(f.statement, f.extra_metadata),
                     project=f.project,
                     topic=f.topic,
                     status=f.status,
@@ -151,7 +214,7 @@ async def search(
                 AdminSearchHit(
                     id=d.id,
                     target_type="decision",
-                    preview=(d.decision or "")[:_PREVIEW],
+                    preview=_admin_preview(d.decision, d.extra_metadata),
                     project=d.project,
                     topic=d.topic,
                     status=d.status,
@@ -338,6 +401,43 @@ async def capture_stats(
             Decision.project.is_(None),
         ),
     )
+    capture_event_types = [
+        "capture_classifier_called",
+        "capture_classifier_failed",
+        "capture_classifier_fallback",
+        "capture_candidates_extracted",
+        "capture_candidate_auto_saved",
+        "capture_classifier_skip",
+        "capture_candidate_needs_review",
+        "capture_secret_candidate_saved",
+    ]
+    capture_event_counts: dict[str, int] = {}
+    for event_type in capture_event_types:
+        capture_event_counts[event_type] = await _count_rows(
+            session,
+            select(func.count()).select_from(MemoryEvent).where(
+                MemoryEvent.profile_id == profile_filter,
+                MemoryEvent.event_type == event_type,
+                MemoryEvent.created_at >= since,
+            ),
+        )
+
+    skip_reason_rows = (
+        await session.execute(
+            select(MemoryEvent.payload)
+            .where(
+                MemoryEvent.profile_id == profile_filter,
+                MemoryEvent.event_type == "capture_classifier_skip",
+                MemoryEvent.created_at >= since,
+            )
+            .order_by(MemoryEvent.created_at.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+    skip_reasons: dict[str, int] = {}
+    for event_payload in skip_reason_rows:
+        reason = str(event_payload.get("reason") or event_payload.get("skipped_reason") or "unknown")
+        skip_reasons[reason] = skip_reasons.get(reason, 0) + 1
 
     fact_rows = (
         await session.execute(
@@ -359,7 +459,7 @@ async def capture_stats(
         {
             "id": row.id,
             "target_type": "fact",
-            "preview": row.statement[:_PREVIEW],
+            "preview": _admin_preview(row.statement, row.extra_metadata),
             "project": row.project,
             "topic": row.topic,
             "status": row.status,
@@ -370,7 +470,7 @@ async def capture_stats(
         {
             "id": row.id,
             "target_type": "decision",
-            "preview": row.decision[:_PREVIEW],
+            "preview": _admin_preview(row.decision, row.extra_metadata),
             "project": row.project,
             "topic": row.topic,
             "status": row.status,
@@ -390,18 +490,33 @@ async def capture_stats(
         "structured_decisions": structured_decisions,
         "skipped_sensitive": skipped_sensitive,
         "global_memories": global_memories,
+        "classifier_calls_today": capture_event_counts["capture_classifier_called"],
+        "classifier_failures_today": capture_event_counts["capture_classifier_failed"],
+        "fallbacks_today": capture_event_counts["capture_classifier_fallback"],
+        "candidate_batches_today": capture_event_counts["capture_candidates_extracted"],
+        "candidate_auto_saved_today": capture_event_counts["capture_candidate_auto_saved"],
+        "candidate_skipped_today": capture_event_counts["capture_classifier_skip"],
+        "candidate_needs_review_today": capture_event_counts["capture_candidate_needs_review"],
+        "secret_candidates_saved_today": capture_event_counts["capture_secret_candidate_saved"],
+        "skip_reasons": skip_reasons,
         "recent_global_memories": recent_global_memories[:5],
     }
 
 
 def _fact_to_detail(row: Fact) -> dict[str, Any]:
+    secret = is_secret_metadata(row.extra_metadata)
+    preview = masked_preview(row.statement, row.extra_metadata) if secret else row.statement
     return {
         "id": row.id,
         "target_type": "fact",
-        "subject": row.subject,
+        "subject": masked_preview(row.subject, row.extra_metadata) if secret else row.subject,
         "predicate": row.predicate,
-        "object": row.object,
-        "statement": row.statement,
+        "object": masked_preview(row.object, row.extra_metadata) if secret else row.object,
+        "statement": preview,
+        "masked_preview": preview if secret else None,
+        "sensitivity": "secret" if secret else str((row.extra_metadata or {}).get("sensitivity") or "internal"),
+        "secret_ref": secret_ref(row.extra_metadata),
+        "secret_masked": secret,
         "project": row.project,
         "topic": row.topic,
         "status": row.status,
@@ -411,21 +526,27 @@ def _fact_to_detail(row: Fact) -> dict[str, Any]:
         "source_event_ids": row.source_event_ids,
         "source_message_ids": row.source_message_ids,
         "superseded_by": row.superseded_by,
-        "metadata": row.extra_metadata,
+        "metadata": sanitize_metadata(row.extra_metadata),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
 
 
 def _decision_to_detail(row: Decision) -> dict[str, Any]:
+    secret = is_secret_metadata(row.extra_metadata)
+    preview = masked_preview(row.decision, row.extra_metadata) if secret else row.decision
     return {
         "id": row.id,
         "target_type": "decision",
         "topic": row.topic,
-        "decision": row.decision,
-        "statement": row.decision,
-        "context": row.context,
-        "rationale": row.rationale,
+        "decision": preview,
+        "statement": preview,
+        "masked_preview": preview if secret else None,
+        "sensitivity": "secret" if secret else str((row.extra_metadata or {}).get("sensitivity") or "internal"),
+        "secret_ref": secret_ref(row.extra_metadata),
+        "secret_masked": secret,
+        "context": masked_preview(row.context, row.extra_metadata) if secret else row.context,
+        "rationale": masked_preview(row.rationale, row.extra_metadata) if secret else row.rationale,
         "tradeoffs": row.tradeoffs,
         "options_considered": row.options_considered,
         "project": row.project,
@@ -434,7 +555,7 @@ def _decision_to_detail(row: Decision) -> dict[str, Any]:
         "source_event_ids": row.source_event_ids,
         "source_message_ids": row.source_message_ids,
         "superseded_by": row.superseded_by,
-        "metadata": row.extra_metadata,
+        "metadata": sanitize_metadata(row.extra_metadata),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "decided_at": row.decided_at,
@@ -483,6 +604,96 @@ async def _source_details(
             }
         )
     return details
+
+
+def _versioned_target(value: Any) -> str:
+    target_type = str(value or "")
+    if target_type not in {"fact", "decision"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_type must be fact or decision")
+    return target_type
+
+
+def _payload_uuid(value: Any, field: str) -> uuid.UUID:
+    if not value:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field} required")
+    try:
+        return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid {field}") from exc
+
+
+def _payload_int(value: Any, field: str) -> int:
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid {field}") from exc
+    if parsed <= 0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"{field} must be positive")
+    return parsed
+
+
+@router.post("/versions/diff")
+async def version_diff(
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+    payload: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    """Return a field-level diff between two persisted memory versions."""
+    profile_filter = str(payload.get("profile_id") or profile_id)
+    target_type = cast(Any, _versioned_target(payload.get("target_type")))
+    target_id = _payload_uuid(payload.get("target_id"), "target_id")
+    try:
+        diff = await MemoryVersionService().diff(
+            session,
+            target_type,
+            target_id,
+            _payload_int(payload.get("from_version"), "from_version"),
+            _payload_int(payload.get("to_version"), "to_version"),
+            profile_id=profile_filter,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return {
+        "target_type": diff.target_type,
+        "target_id": diff.target_id,
+        "from_version": diff.from_version,
+        "to_version": diff.to_version,
+        "changes": diff.changes,
+    }
+
+
+@router.post("/versions/rollback")
+async def version_rollback(
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+    payload: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    """Rollback a fact/decision row to a previously recorded version snapshot."""
+    profile_filter = str(payload.get("profile_id") or profile_id)
+    target_type = cast(Any, _versioned_target(payload.get("target_type")))
+    target_id = _payload_uuid(payload.get("target_id"), "target_id")
+    try:
+        result = await MemoryVersionService().rollback(
+            session,
+            target_type=target_type,
+            target_id=target_id,
+            to_version=_payload_int(payload.get("to_version"), "to_version"),
+            profile_id=profile_filter,
+            actor="admin",
+            reason=str(payload.get("reason") or "admin rollback"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return {
+        "target_type": result.target_type,
+        "target_id": result.target_id,
+        "rolled_back": result.rolled_back,
+        "rollback_to_version": result.rollback_to_version,
+        "new_version": result.new_version,
+        "event_id": result.event_id,
+    }
 
 
 @router.post("/detail")
@@ -609,6 +820,79 @@ async def detail(
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported target_type")
 
 
+@router.post("/secrets/reveal")
+async def reveal_secret(
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+    payload: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    """Explicitly reveal a secret memory value and write an audit event."""
+    profile_filter = str(payload.get("profile_id") or profile_id)
+    target_type = str(payload.get("target_type") or "")
+    target_id = payload.get("target_id")
+    reason = str(payload.get("reason") or "admin reveal")
+    if not target_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target_id required")
+
+    statement = ""
+    metadata: dict[str, Any] = {}
+    if target_type == "fact":
+        fact_row = (
+            await session.execute(
+                select(Fact).where(Fact.id == target_id, Fact.profile_id == profile_filter)
+            )
+        ).scalar_one_or_none()
+        if fact_row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="fact not found")
+        statement = fact_row.statement
+        metadata = fact_row.extra_metadata or {}
+    elif target_type == "decision":
+        decision_row = (
+            await session.execute(
+                select(Decision).where(Decision.id == target_id, Decision.profile_id == profile_filter)
+            )
+        ).scalar_one_or_none()
+        if decision_row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="decision not found")
+        statement = decision_row.decision
+        metadata = decision_row.extra_metadata or {}
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported target_type")
+
+    if not is_secret_metadata(metadata):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="target is not marked secret")
+    value = secret_value_for_reveal(statement, metadata)
+    if value is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="secret value unavailable")
+
+    await IngestService(profile_id=profile_filter).ingest_event(
+        session,
+        GenericEventIn(
+            profile_id=profile_filter,
+            event_type="secret_revealed",
+            source="admin_api",
+            actor="admin",
+            agent_context="primary",
+            payload={
+                "event_type": "secret_revealed",
+                "target_type": target_type,
+                "target_id": str(target_id),
+                "reason": reason,
+                "secret_ref": secret_ref(metadata),
+                "masked_preview": masked_preview(statement, metadata),
+            },
+        ),
+    )
+    await session.commit()
+    return {
+        "target_type": target_type,
+        "target_id": str(target_id),
+        "secret_value": value,
+        "masked_preview": masked_preview(statement, metadata),
+    }
+
+
 @router.post("/export")
 async def export_markdown(
     session: SessionDep,
@@ -647,7 +931,9 @@ async def export_markdown(
                 [
                     f"### {decision_row.topic}",
                     "",
-                    decision_row.decision,
+                    masked_preview(decision_row.decision, decision_row.extra_metadata)
+                    if is_secret_metadata(decision_row.extra_metadata)
+                    else decision_row.decision,
                     "",
                     f"- Status: `{decision_row.status}`",
                     f"- Project: `{decision_row.project or ''}`",
@@ -665,7 +951,9 @@ async def export_markdown(
                 [
                     f"### {fact_row.subject} — {fact_row.predicate}",
                     "",
-                    fact_row.statement,
+                    masked_preview(fact_row.statement, fact_row.extra_metadata)
+                    if is_secret_metadata(fact_row.extra_metadata)
+                    else fact_row.statement,
                     "",
                     f"- Status: `{fact_row.status}`",
                     f"- Project: `{fact_row.project or ''}`",

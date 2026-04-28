@@ -29,6 +29,7 @@ from siqueira_memo.models.constants import (
     EVENT_TYPE_FACT_EXTRACTED,
     EVENT_TYPE_FACT_INVALIDATED,
     EVENT_TYPE_USER_CORRECTION,
+    RELATIONSHIP_SUPERSEDES,
     STATUS_ACTIVE,
     STATUS_INVALIDATED,
     STATUS_SUPERSEDED,
@@ -39,6 +40,8 @@ from siqueira_memo.schemas.memory import (
     RememberRequest,
     RememberResponse,
 )
+from siqueira_memo.services.memory_version_service import MemoryVersionService, snapshot_memory
+from siqueira_memo.services.relationship_service import RelationshipService
 from siqueira_memo.utils.canonical import decision_canonical_key, fact_canonical_key
 
 log = get_logger(__name__)
@@ -88,7 +91,11 @@ class ExtractionService:
         ).scalar_one_or_none()
 
         superseded: list[uuid.UUID] = []
+        version_before: dict[str, object] | None = None
+        version_operation = "create"
         if existing_active is not None:
+            version_before = snapshot_memory(existing_active)
+            version_operation = "update"
             # Merge sources; do not create duplicate active.
             merged_events = sorted(
                 {
@@ -175,6 +182,18 @@ class ExtractionService:
             FactSource(fact_id=fact_id, event_id=event_id, message_id=None)
         )
         await session.flush()
+        await MemoryVersionService().record(
+            session,
+            target_type="fact",
+            target_id=fact_id,
+            profile_id=profile_id,
+            operation=version_operation,
+            before_snapshot=version_before,
+            after_snapshot=snapshot_memory(fact_row),
+            event_id=event_id,
+            actor=self.actor,
+            reason="manual remember",
+        )
 
         log.info(
             "extraction.remember.fact",
@@ -213,7 +232,11 @@ class ExtractionService:
         ).scalar_one_or_none()
         superseded: list[uuid.UUID] = []
         decided_at = datetime.now(UTC)
+        version_before: dict[str, object] | None = None
+        version_operation = "create"
         if existing_active is not None:
+            version_before = snapshot_memory(existing_active)
+            version_operation = "update"
             merged_events = sorted(
                 {
                     str(x)
@@ -301,6 +324,18 @@ class ExtractionService:
             DecisionSource(decision_id=decision_id, event_id=event_id, message_id=None)
         )
         await session.flush()
+        await MemoryVersionService().record(
+            session,
+            target_type="decision",
+            target_id=decision_id,
+            profile_id=profile_id,
+            operation=version_operation,
+            before_snapshot=version_before,
+            after_snapshot=snapshot_memory(decision_row),
+            event_id=event_id,
+            actor=self.actor,
+            reason="manual remember",
+        )
 
         log.info(
             "extraction.remember.decision",
@@ -331,6 +366,10 @@ class ExtractionService:
         invalidated: list[uuid.UUID] = []
         superseded: list[uuid.UUID] = []
         replacement_id: uuid.UUID | None = None
+        fact_version_before: dict[str, object] | None = None
+        decision_version_before: dict[str, object] | None = None
+        fact_version_row: Fact | None = None
+        decision_version_row: Decision | None = None
 
         session.add(
             MemoryEvent(
@@ -358,6 +397,8 @@ class ExtractionService:
                 )
             ).scalar_one_or_none()
             if fact is not None:
+                fact_version_before = snapshot_memory(fact)
+                fact_version_row = fact
                 fact.status = (
                     STATUS_SUPERSEDED if request.replacement else STATUS_INVALIDATED
                 )
@@ -387,6 +428,8 @@ class ExtractionService:
                 )
             ).scalar_one_or_none()
             if decision is not None:
+                decision_version_before = snapshot_memory(decision)
+                decision_version_row = decision
                 decision.status = (
                     STATUS_SUPERSEDED if request.replacement else STATUS_INVALIDATED
                 )
@@ -426,6 +469,7 @@ class ExtractionService:
                 ).scalar_one_or_none()
                 if fact_row is not None:
                     fact_row.superseded_by = replacement_id
+                    fact_version_row = fact_row
             if request.target_type == "decision" and superseded:
                 decision_row = (
                     await session.execute(
@@ -434,8 +478,62 @@ class ExtractionService:
                 ).scalar_one_or_none()
                 if decision_row is not None:
                     decision_row.superseded_by = replacement_id
+                    decision_version_row = decision_row
 
         await session.flush()
+        if replacement_id is not None:
+            if request.target_type == "fact" and invalidated:
+                await RelationshipService(profile_id=profile_id, actor=self.actor).create(
+                    session,
+                    source_type=request.replacement.kind if request.replacement else "fact",
+                    source_id=replacement_id,
+                    relationship_type=RELATIONSHIP_SUPERSEDES,
+                    target_type="fact",
+                    target_id=invalidated[0],
+                    confidence=1.0,
+                    rationale=request.correction_text,
+                    source_event_ids=[event_id],
+                    metadata={"source": "correction"},
+                )
+            elif request.target_type == "decision" and superseded:
+                await RelationshipService(profile_id=profile_id, actor=self.actor).create(
+                    session,
+                    source_type=request.replacement.kind if request.replacement else "decision",
+                    source_id=replacement_id,
+                    relationship_type=RELATIONSHIP_SUPERSEDES,
+                    target_type="decision",
+                    target_id=superseded[0],
+                    confidence=1.0,
+                    rationale=request.correction_text,
+                    source_event_ids=[event_id],
+                    metadata={"source": "correction"},
+                )
+        if fact_version_row is not None:
+            await MemoryVersionService().record(
+                session,
+                target_type="fact",
+                target_id=fact_version_row.id,
+                profile_id=profile_id,
+                operation="supersede" if request.replacement else "invalidate",
+                before_snapshot=fact_version_before,
+                after_snapshot=snapshot_memory(fact_version_row),
+                event_id=event_id,
+                actor=self.actor,
+                reason=request.correction_text,
+            )
+        if decision_version_row is not None:
+            await MemoryVersionService().record(
+                session,
+                target_type="decision",
+                target_id=decision_version_row.id,
+                profile_id=profile_id,
+                operation="supersede" if request.replacement else "invalidate",
+                before_snapshot=decision_version_before,
+                after_snapshot=snapshot_memory(decision_version_row),
+                event_id=event_id,
+                actor=self.actor,
+                reason=request.correction_text,
+            )
 
         log.info(
             "extraction.correction_applied",

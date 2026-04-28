@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,6 +45,12 @@ from siqueira_memo.models.constants import (
     STATUS_STALE,
 )
 from siqueira_memo.schemas.memory import ForgetRequest, ForgetResponse
+from siqueira_memo.services.memory_version_service import (
+    MemoryVersionService,
+    VersionedTarget,
+    snapshot_for_hard_delete,
+    snapshot_memory,
+)
 
 log = get_logger(__name__)
 
@@ -81,6 +87,30 @@ class DeletionService:
         removed_chunks = 0
         removed_embeddings = 0
         regenerated_summaries = 0
+        version_before: dict[str, Any] | None = None
+        cascade_versions_before: dict[tuple[VersionedTarget, uuid.UUID], dict[str, Any]] = {}
+        if target_type in {"message", "session", "entity"}:
+            cascade_versions_before = await self._snapshot_versioned_memories(
+                session, profile_id
+            )
+        if target_type == "fact":
+            version_before = snapshot_memory(
+                (
+                    await session.execute(
+                        select(Fact).where(Fact.id == target_id, Fact.profile_id == profile_id)
+                    )
+                ).scalar_one_or_none()
+            )
+        elif target_type == "decision":
+            version_before = snapshot_memory(
+                (
+                    await session.execute(
+                        select(Decision).where(
+                            Decision.id == target_id, Decision.profile_id == profile_id
+                        )
+                    )
+                ).scalar_one_or_none()
+            )
 
         if target_type == "fact":
             invalidated_facts = await self._invalidate_fact(session, profile_id, target_id, mode)
@@ -141,6 +171,61 @@ class DeletionService:
             )
         )
         await session.flush()
+        if target_type in {"fact", "decision"} and version_before is not None:
+            version_after = None
+            if mode != "hard":
+                if target_type == "fact":
+                    version_after = snapshot_memory(
+                        (
+                            await session.execute(
+                                select(Fact).where(
+                                    Fact.id == target_id,
+                                    Fact.profile_id == profile_id,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                    )
+                else:
+                    version_after = snapshot_memory(
+                        (
+                            await session.execute(
+                                select(Decision).where(
+                                    Decision.id == target_id,
+                                    Decision.profile_id == profile_id,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                    )
+            version_service = MemoryVersionService()
+            if mode == "hard":
+                await version_service.scrub_target_history_for_hard_delete(
+                    session,
+                    target_type=cast(VersionedTarget, target_type),
+                    target_id=target_id,
+                    profile_id=profile_id,
+                )
+            await version_service.record(
+                session,
+                target_type=cast(VersionedTarget, target_type),
+                target_id=target_id,
+                profile_id=profile_id,
+                operation="hard_delete" if mode == "hard" else "soft_delete",
+                before_snapshot=snapshot_for_hard_delete(version_before)
+                if mode == "hard"
+                else version_before,
+                after_snapshot=version_after,
+                event_id=event_id,
+                actor="user",
+                reason=request.reason,
+            )
+        if cascade_versions_before:
+            await self._record_cascade_versions(
+                session,
+                profile_id=profile_id,
+                before=cascade_versions_before,
+                event_id=event_id,
+                reason=request.reason,
+            )
 
         log.info(
             "forget",
@@ -167,6 +252,57 @@ class DeletionService:
             removed_embeddings=removed_embeddings,
             regenerated_summaries=regenerated_summaries,
         )
+
+    # ------------------------------------------------------------------
+    # Version snapshots for cascaded forget side effects
+    # ------------------------------------------------------------------
+    async def _snapshot_versioned_memories(
+        self, session: AsyncSession, profile_id: str
+    ) -> dict[tuple[VersionedTarget, uuid.UUID], dict[str, Any]]:
+        snapshots: dict[tuple[VersionedTarget, uuid.UUID], dict[str, Any]] = {}
+        facts = (
+            await session.execute(select(Fact).where(Fact.profile_id == profile_id))
+        ).scalars().all()
+        for fact in facts:
+            snapshot = snapshot_memory(fact)
+            if snapshot is not None:
+                snapshots[("fact", fact.id)] = snapshot
+        decisions = (
+            await session.execute(select(Decision).where(Decision.profile_id == profile_id))
+        ).scalars().all()
+        for decision in decisions:
+            snapshot = snapshot_memory(decision)
+            if snapshot is not None:
+                snapshots[("decision", decision.id)] = snapshot
+        return snapshots
+
+    async def _record_cascade_versions(
+        self,
+        session: AsyncSession,
+        *,
+        profile_id: str,
+        before: dict[tuple[VersionedTarget, uuid.UUID], dict[str, Any]],
+        event_id: uuid.UUID,
+        reason: str | None,
+    ) -> None:
+        after = await self._snapshot_versioned_memories(session, profile_id)
+        for key, before_snapshot in before.items():
+            after_snapshot = after.get(key)
+            if before_snapshot == after_snapshot:
+                continue
+            target_type, target_id = key
+            await MemoryVersionService().record(
+                session,
+                target_type=target_type,
+                target_id=target_id,
+                profile_id=profile_id,
+                operation="cascade_forget",
+                before_snapshot=before_snapshot,
+                after_snapshot=after_snapshot,
+                event_id=event_id,
+                actor="user",
+                reason=reason,
+            )
 
     # ------------------------------------------------------------------
     # Individual target handlers
@@ -418,6 +554,8 @@ class DeletionService:
                 )
             )
         ).scalars().all()
+        facts_touched = 0
+        decisions_touched = 0
         for m in messages:
             res = await self._forget_message(
                 session, profile_id, m.id, mode="hard", scrub_raw=scrub_raw
@@ -425,8 +563,8 @@ class DeletionService:
             removed_chunks += res["chunks"]
             removed_embeddings += res["embeddings"]
             summaries_touched += res["summaries"]
-        facts_touched = 0
-        decisions_touched = 0
+            facts_touched += res["facts"]
+            decisions_touched += res["decisions"]
         return {
             "chunks": removed_chunks,
             "embeddings": removed_embeddings,

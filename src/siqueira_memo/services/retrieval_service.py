@@ -21,6 +21,7 @@ import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +58,13 @@ from siqueira_memo.services.embedding_service import (
     EmbeddingProvider,
     MockEmbeddingProvider,
     cosine,
+)
+from siqueira_memo.services.relationship_service import RelationshipService
+from siqueira_memo.services.secret_policy import (
+    is_secret_metadata,
+    masked_preview,
+    recall_policy,
+    secret_ref,
 )
 from siqueira_memo.utils.canonical import normalize_text
 
@@ -160,14 +168,20 @@ class RetrievalService:
             )
             candidates_count += len(decision_rows)
             for decision in decision_rows:
-                decisions_out.append(self._decision_to_schema(decision))
+                decisions_out.append(
+                    self._decision_to_schema(
+                        decision, allow_secret_recall=request.allow_secret_recall
+                    )
+                )
 
         # ---------- facts ----------
         if "facts" in want_types or not want_types:
             fact_rows = await self._query_facts(session, request, tokens, limits["facts"])
             candidates_count += len(fact_rows)
             for fact in fact_rows:
-                facts_out.append(self._fact_to_schema(fact))
+                facts_out.append(
+                    self._fact_to_schema(fact, allow_secret_recall=request.allow_secret_recall)
+                )
 
         # ---------- chunks (lexical + vector) ----------
         if "chunks" in want_types or not want_types:
@@ -189,6 +203,16 @@ class RetrievalService:
             )
             candidates_count += len(summaries_out)
 
+        # ---------- relationship graph expansion ----------
+        if "decisions" in want_types or "facts" in want_types or not want_types:
+            await self._expand_relationship_graph(
+                session,
+                request,
+                decisions_out=decisions_out,
+                facts_out=facts_out,
+                limit=max(2, min(12, request.limit)),
+            )
+
         # ---------- conflicts ----------
         conflicts = _detect_conflicts(decisions_out, facts_out) if request.include_conflicts else []
 
@@ -196,6 +220,8 @@ class RetrievalService:
         answer_context = _build_answer_context(decisions_out, facts_out, summaries_out)
         confidence = _confidence_hint(decisions_out, facts_out, chunks_out, conflicts)
         warnings = _collect_warnings(decisions_out, facts_out, conflicts, mode, limits, chunks_out)
+        if not request.allow_secret_recall and await self._has_secret_candidates(session, request):
+            warnings.append("secret memories matched scope but were omitted; set allow_secret_recall=true and ask explicitly to inspect masked secret records")
 
         token_estimate = _estimate_tokens(answer_context, chunks_out, decisions_out, facts_out)
 
@@ -276,6 +302,7 @@ class RetrievalService:
         ).limit(limit * 4)
 
         rows = list((await session.execute(stmt)).scalars().all())
+        rows = [row for row in rows if _secret_allowed(row.extra_metadata, request)]
         if tokens:
             # Rank by token overlap with decision/topic/rationale.
             def match(d: Decision) -> float:
@@ -305,7 +332,8 @@ class RetrievalService:
             stmt = stmt.where(Fact.project == request.project)
         if request.topic is not None:
             stmt = stmt.where(Fact.topic == request.topic)
-        rows = list((await session.execute(stmt.limit(limit * 4))).scalars().all())
+        rows = list((await session.execute(stmt.limit(limit * 8))).scalars().all())
+        rows = [row for row in rows if _secret_allowed(row.extra_metadata, request)]
         if tokens:
             def score(fact: Fact) -> float:
                 text = " ".join(
@@ -341,6 +369,8 @@ class RetrievalService:
         if request.topic is not None:
             stmt = stmt.where(Chunk.topic == request.topic)
         rows = list((await session.execute(stmt.limit(limit * 4))).scalars().all())
+        if not request.allow_secret_recall:
+            rows = [row for row in rows if row.sensitivity not in {"sensitive", "secret"}]
         return rows
 
     def _score_candidates(self, candidates: Iterable[Chunk], query: str) -> list[_Candidate]:
@@ -425,45 +455,194 @@ class RetrievalService:
                 )
         return out[:limit]
 
+    async def _expand_relationship_graph(
+        self,
+        session: AsyncSession,
+        request: RecallRequest,
+        *,
+        decisions_out: list[RecallDecision],
+        facts_out: list[RecallFact],
+        limit: int,
+    ) -> None:
+        seeds: list[tuple[str, uuid.UUID]] = [("decision", d.id) for d in decisions_out]
+        seeds.extend(("fact", f.id) for f in facts_out)
+        seeds.extend(await self._query_relationship_seed_rows(session, request, limit=max(20, limit * 4)))
+        seeds = _dedupe_seed_nodes(seeds)
+        if not seeds:
+            return
+        related = await RelationshipService(profile_id=self.profile_id).expand_related(
+            session, seeds, limit=limit
+        )
+        if not related:
+            return
+        decision_ids = {d.id for d in decisions_out}
+        fact_ids = {f.id for f in facts_out}
+        want_decisions = "decisions" in set(request.types or []) or not request.types
+        want_facts = "facts" in set(request.types or []) or not request.types
+        for rel in related:
+            if rel.target_type == "decision" and want_decisions:
+                existing = next((d for d in decisions_out if d.id == rel.target_id), None)
+                if existing is not None:
+                    existing.retrieval_lane = "graph"
+                    existing.retrieval_explanation = rel.explanation
+                    continue
+                decision_row = (
+                    await session.execute(
+                        select(Decision).where(
+                            Decision.id == rel.target_id,
+                            Decision.profile_id == self.profile_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if decision_row is None or not _secret_allowed(decision_row.extra_metadata, request):
+                    continue
+                decision_schema = self._decision_to_schema(
+                    decision_row,
+                    allow_secret_recall=request.allow_secret_recall,
+                    retrieval_lane="graph",
+                    retrieval_explanation=rel.explanation,
+                )
+                decisions_out.append(decision_schema)
+                decision_ids.add(decision_schema.id)
+            elif rel.target_type == "fact" and want_facts:
+                existing_fact = next((f for f in facts_out if f.id == rel.target_id), None)
+                if existing_fact is not None:
+                    existing_fact.retrieval_lane = "graph"
+                    existing_fact.retrieval_explanation = rel.explanation
+                    continue
+                fact_row = (
+                    await session.execute(
+                        select(Fact).where(
+                            Fact.id == rel.target_id,
+                            Fact.profile_id == self.profile_id,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if fact_row is None or not _secret_allowed(fact_row.extra_metadata, request):
+                    continue
+                fact_schema = self._fact_to_schema(
+                    fact_row,
+                    allow_secret_recall=request.allow_secret_recall,
+                    retrieval_lane="graph",
+                    retrieval_explanation=rel.explanation,
+                )
+                facts_out.append(fact_schema)
+                fact_ids.add(fact_schema.id)
+
+    async def _query_relationship_seed_rows(
+        self, session: AsyncSession, request: RecallRequest, *, limit: int
+    ) -> list[tuple[str, uuid.UUID]]:
+        tokens = _tokenize(request.query)
+        if not tokens:
+            return []
+        seeds: list[tuple[str, uuid.UUID]] = []
+        fact_stmt = select(Fact).where(Fact.profile_id == self.profile_id)
+        decision_stmt = select(Decision).where(Decision.profile_id == self.profile_id)
+        if request.project is not None:
+            fact_stmt = fact_stmt.where(Fact.project == request.project)
+            decision_stmt = decision_stmt.where(Decision.project == request.project)
+        if request.topic is not None:
+            fact_stmt = fact_stmt.where(Fact.topic == request.topic)
+            decision_stmt = decision_stmt.where(Decision.topic == request.topic)
+        fact_rows = list((await session.execute(fact_stmt.limit(limit))).scalars().all())
+        for fact in fact_rows:
+            text = normalize_text(" ".join([fact.statement, fact.subject, fact.predicate, fact.object, fact.topic or ""]))
+            if any(token in text for token in tokens):
+                seeds.append(("fact", fact.id))
+        decision_rows = list((await session.execute(decision_stmt.limit(limit))).scalars().all())
+        for decision in decision_rows:
+            text = normalize_text(" ".join([decision.decision, decision.topic, decision.context or "", decision.rationale]))
+            if any(token in text for token in tokens):
+                seeds.append(("decision", decision.id))
+        return seeds
+
+    async def _has_secret_candidates(self, session: AsyncSession, request: RecallRequest) -> bool:
+        fact_stmt = select(Fact).where(Fact.profile_id == self.profile_id)
+        decision_stmt = select(Decision).where(Decision.profile_id == self.profile_id)
+        if request.project is not None:
+            fact_stmt = fact_stmt.where(Fact.project == request.project)
+            decision_stmt = decision_stmt.where(Decision.project == request.project)
+        if request.topic is not None:
+            fact_stmt = fact_stmt.where(Fact.topic == request.topic)
+            decision_stmt = decision_stmt.where(Decision.topic == request.topic)
+        facts = list((await session.execute(fact_stmt.limit(50))).scalars().all())
+        if any(is_secret_metadata(fact.extra_metadata) for fact in facts):
+            return True
+        decisions = list((await session.execute(decision_stmt.limit(50))).scalars().all())
+        return any(is_secret_metadata(decision.extra_metadata) for decision in decisions)
+
     # ------------------------------------------------------------------
     # Conversions
     # ------------------------------------------------------------------
-    def _decision_to_schema(self, decision: Decision) -> RecallDecision:
+    def _decision_to_schema(
+        self,
+        decision: Decision,
+        *,
+        allow_secret_recall: bool,
+        retrieval_lane: str = "structured",
+        retrieval_explanation: str | None = None,
+    ) -> RecallDecision:
+        metadata = decision.extra_metadata or {}
+        secret = is_secret_metadata(metadata)
+        decision_text = masked_preview(decision.decision, metadata) if secret else decision.decision
+        rationale = masked_preview(decision.rationale, metadata) if secret else decision.rationale
         return RecallDecision(
             id=decision.id,
             project=decision.project,
             topic=decision.topic,
-            decision=decision.decision,
-            rationale=decision.rationale,
+            decision=decision_text,
+            rationale=rationale,
             status=decision.status,
             reversible=decision.reversible,
             decided_at=decision.decided_at,
             confidence=float(decision.extra_metadata.get("confidence", 0.0))
             if decision.extra_metadata
             else 0.0,
+            sensitivity="secret" if secret else str(metadata.get("sensitivity") or "internal"),
+            masked_preview=masked_preview(decision.decision, metadata) if secret else None,
+            secret_ref=secret_ref(metadata),
+            secret_masked=secret,
+            retrieval_lane=retrieval_lane,
+            retrieval_explanation=retrieval_explanation,
             sources=[
                 SourceRef(event_id=str(eid))
                 for eid in (decision.source_event_ids or [])
             ],
         )
 
-    def _fact_to_schema(self, fact: Fact) -> RecallFact:
+    def _fact_to_schema(
+        self,
+        fact: Fact,
+        *,
+        allow_secret_recall: bool,
+        retrieval_lane: str = "structured",
+        retrieval_explanation: str | None = None,
+    ) -> RecallFact:
+        metadata = fact.extra_metadata or {}
+        secret = is_secret_metadata(metadata)
+        preview = masked_preview(fact.statement, metadata) if secret else None
         return RecallFact(
             id=fact.id,
-            subject=fact.subject,
+            subject=masked_preview(fact.subject, metadata) if secret else fact.subject,
             predicate=fact.predicate,
-            object=fact.object,
-            statement=fact.statement,
+            object=masked_preview(fact.object, metadata) if secret else fact.object,
+            statement=preview if secret else fact.statement,
             status=fact.status,
             confidence=float(fact.confidence or 0.0),
             project=fact.project,
             topic=fact.topic,
             valid_from=fact.valid_from,
             valid_to=fact.valid_to,
+            sensitivity="secret" if secret else str(metadata.get("sensitivity") or "internal"),
+            masked_preview=preview,
+            secret_ref=secret_ref(metadata),
+            secret_masked=secret,
+            retrieval_lane=retrieval_lane,
+            retrieval_explanation=retrieval_explanation,
             sources=[
-                SourceRef(event_id=str(eid))
-                for eid in (fact.source_event_ids or [])
+                SourceRef(event_id=str(eid)) for eid in (fact.source_event_ids or [])
             ],
+
         )
 
     def _chunk_to_schema(self, candidate: _Candidate) -> RecallChunk:
@@ -484,6 +663,17 @@ class RetrievalService:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+def _dedupe_seed_nodes(seeds: Sequence[tuple[str, uuid.UUID]]) -> list[tuple[str, uuid.UUID]]:
+    seen: set[tuple[str, uuid.UUID]] = set()
+    out: list[tuple[str, uuid.UUID]] = []
+    for seed in seeds:
+        if seed in seen:
+            continue
+        seen.add(seed)
+        out.append(seed)
+    return out
+
+
 def _build_answer_context(
     decisions: Sequence[RecallDecision],
     facts: Sequence[RecallFact],
@@ -549,6 +739,8 @@ def _top_sources(
 ) -> list[SourceRef]:
     out: list[SourceRef] = []
     for c in chunks[:3]:
+        if c.sensitivity in {"sensitive", "secret"}:
+            continue
         out.append(
             SourceRef(
                 event_id=str(c.source_id),
@@ -557,6 +749,12 @@ def _top_sources(
             )
         )
     return out
+
+
+def _secret_allowed(metadata: dict[str, Any] | None, request: RecallRequest) -> bool:
+    if not is_secret_metadata(metadata):
+        return True
+    return request.allow_secret_recall and recall_policy(metadata) != "never_prefetch"
 
 
 def _source_ids(

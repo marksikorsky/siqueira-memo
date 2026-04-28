@@ -22,7 +22,9 @@ from siqueira_memo.models.entities import Entity, EntityAlias, EntityRelationshi
 from siqueira_memo.models.evals import EvalRun
 from siqueira_memo.models.events import MemoryEvent
 from siqueira_memo.models.facts import Fact, FactSource
+from siqueira_memo.models.memory_versions import MemoryVersion
 from siqueira_memo.models.messages import Message
+from siqueira_memo.models.relationships import MemoryRelationship
 from siqueira_memo.models.retrieval import MemoryConflict, PromptVersion, RetrievalLog
 from siqueira_memo.models.summaries import ProjectState, SessionSummary, TopicSummary
 from siqueira_memo.models.tools import ToolEvent
@@ -46,6 +48,8 @@ __all__ = [
     "FactSource",
     "MemoryConflict",
     "MemoryEvent",
+    "MemoryRelationship",
+    "MemoryVersion",
     "Message",
     "ProjectState",
     "PromptVersion",

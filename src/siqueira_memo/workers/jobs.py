@@ -33,6 +33,7 @@ from siqueira_memo.schemas.ingest import (
     MessageIngestIn,
 )
 from siqueira_memo.schemas.memory import RememberRequest
+from siqueira_memo.schemas.memory_capture import MemoryCandidate, MemoryCaptureResult
 from siqueira_memo.schemas.recall import RecallRequest
 from siqueira_memo.services.chunking_service import ChunkingService
 from siqueira_memo.services.context_pack_service import ContextPackShaper
@@ -48,7 +49,7 @@ from siqueira_memo.services.memory_capture_classifier import (
     MemoryCaptureDecision,
     classify_turn_memory,
 )
-from siqueira_memo.services.redaction_service import RedactionService
+from siqueira_memo.services.redaction_service import RedactionService, redact
 from siqueira_memo.services.retrieval_service import RetrievalService
 from siqueira_memo.services.scope_classifier import classify_memory_scope
 from siqueira_memo.workers.queue import Job, JobQueue, get_default_queue
@@ -561,7 +562,7 @@ async def sync_turn_handler(payload: dict[str, Any]) -> None:
 
 
 async def extract_turn_memory_handler(payload: dict[str, Any]) -> None:
-    """Deterministic aggressive v1 structured extraction for a turn."""
+    """Extract zero or more structured memory candidates from a completed turn."""
     ctx = JobContext.default()
     if ctx.settings.memory_capture_mode == "off":
         return
@@ -574,6 +575,24 @@ async def extract_turn_memory_handler(payload: dict[str, Any]) -> None:
     source_message_ids = [uuid.UUID(str(x)) for x in payload.get("source_message_ids", [])]
     project = payload.get("project")
     topic = payload.get("topic") or "conversation"
+    factory = get_session_factory(ctx.settings)
+
+    if ctx.settings.memory_capture_llm_enabled:
+        async with factory() as session:
+            await _record_capture_audit(
+                session,
+                profile_id=profile_id,
+                session_id=session_id,
+                event_type="capture_classifier_called",
+                audit_payload={
+                    "classifier_model": ctx.settings.memory_capture_llm_model,
+                    "project": project,
+                    "topic": topic,
+                    "source_event_ids": [str(x) for x in source_event_ids],
+                    "source_message_ids": [str(x) for x in source_message_ids],
+                },
+            )
+            await session.commit()
 
     llm_capture = classify_turn_memory(
         ctx.settings,
@@ -582,91 +601,319 @@ async def extract_turn_memory_handler(payload: dict[str, Any]) -> None:
         default_project=project,
         default_topic=topic,
     )
+
+    model_provider = "openai-compatible"
+    model_name = ctx.settings.memory_capture_llm_model
+    capture_result: MemoryCaptureResult | None = None
     if llm_capture is not None:
-        if not llm_capture.save:
-            factory = get_session_factory(ctx.settings)
+        capture_result = _normalize_capture_output(llm_capture, default_project=project, default_topic=topic)
+        model_name = capture_result.classifier_model or model_name
+    else:
+        if ctx.settings.memory_capture_llm_enabled:
             async with factory() as session:
-                await IngestService(profile_id=profile_id).ingest_event(
+                await _record_capture_audit(
                     session,
-                    GenericEventIn(
-                        profile_id=profile_id,
-                        session_id=session_id,
-                        event_type="capture_classifier_skip",
-                        source="memory_capture_classifier",
-                        actor="siqueira-capture",
-                        agent_context="primary",
-                        payload={
-                            "event_type": "capture_classifier_skip",
-                            "reason": llm_capture.rationale,
-                            "confidence": llm_capture.confidence,
-                            "source_event_ids": [str(x) for x in source_event_ids],
-                            "source_message_ids": [str(x) for x in source_message_ids],
-                        },
-                    ),
+                    profile_id=profile_id,
+                    session_id=session_id,
+                    event_type="capture_classifier_failed",
+                    audit_payload={
+                        "reason": "classifier_unavailable_or_failed",
+                        "fallback_available": _looks_useful_for_structured_memory(combined),
+                    },
                 )
                 await session.commit()
-            return
-        capture = llm_capture
-        model_provider = "openai-compatible"
-        model_name = ctx.settings.memory_capture_llm_model
-    else:
         if not _looks_useful_for_structured_memory(combined):
             return
-        capture = _heuristic_capture(combined, user_content, assistant_content, project, topic)
+        heuristic = _heuristic_capture(combined, user_content, assistant_content, project, topic)
+        capture_result = _normalize_capture_output(heuristic, default_project=project, default_topic=topic)
         model_provider = "heuristic"
         model_name = "aggressive-v1"
-
-    svc = ExtractionService(
-        profile_id=profile_id,
-        actor="siqueira-capture",
-        model_provider=model_provider,
-        model_name=model_name,
-    )
-    factory = get_session_factory(ctx.settings)
-    async with factory() as session:
-        if capture.kind == "decision":
-            await svc.remember(
+        async with factory() as session:
+            await _record_capture_audit(
                 session,
-                RememberRequest(
-                    profile_id=profile_id,
-                    session_id=session_id,
-                    kind="decision",
-                    statement=capture.statement,
-                    project=capture.project,
-                    topic=capture.topic or topic,
-                    rationale=capture.rationale,
-                    confidence=capture.confidence or 0.9,
-                    source_event_ids=source_event_ids,
-                    source_message_ids=source_message_ids,
-                    metadata={
-                        "capture_mode": payload.get("mode", "aggressive"),
-                        "capture_classifier": model_provider,
-                    },
-                ),
+                profile_id=profile_id,
+                session_id=session_id,
+                event_type="capture_classifier_fallback",
+                audit_payload={
+                    "fallback_reason": "classifier_unavailable_or_failed",
+                    "fallback_classifier": model_name,
+                },
             )
-        else:
-            await svc.remember(
+            await session.commit()
+
+    async with factory() as session:
+        await _record_capture_audit(
+            session,
+            profile_id=profile_id,
+            session_id=session_id,
+            event_type="capture_candidates_extracted",
+            audit_payload={
+                "candidate_count": len(capture_result.candidates),
+                "prompt_version": capture_result.prompt_version,
+                "classifier_model": model_name,
+                "classifier_provider": model_provider,
+                "skipped_reason": capture_result.skipped_reason,
+            },
+        )
+
+        svc = ExtractionService(
+            profile_id=profile_id,
+            actor="siqueira-capture",
+            model_provider=model_provider,
+            model_name=model_name,
+            schema_version="capture-v2",
+        )
+        for index, candidate in enumerate(capture_result.candidates):
+            await _process_capture_candidate(
                 session,
-                RememberRequest(
-                    profile_id=profile_id,
-                    session_id=session_id,
-                    kind="fact",
-                    subject=capture.subject or "conversation",
-                    predicate=capture.predicate or "captured",
-                    object=capture.object or _fact_object(capture.statement),
-                    statement=capture.statement,
-                    project=capture.project,
-                    topic=capture.topic or topic,
-                    confidence=capture.confidence or 0.82,
-                    source_event_ids=source_event_ids,
-                    source_message_ids=source_message_ids,
-                    metadata={
-                        "capture_mode": payload.get("mode", "aggressive"),
-                        "capture_classifier": model_provider,
-                    },
-                ),
+                svc=svc,
+                candidate=candidate,
+                index=index,
+                payload=payload,
+                profile_id=profile_id,
+                session_id=session_id,
+                source_event_ids=source_event_ids,
+                source_message_ids=source_message_ids,
+                default_topic=topic,
+                model_provider=model_provider,
+                model_name=model_name,
+                prompt_version=capture_result.prompt_version,
             )
         await session.commit()
+
+
+async def _process_capture_candidate(
+    session: AsyncSession,
+    *,
+    svc: ExtractionService,
+    candidate: MemoryCandidate,
+    index: int,
+    payload: dict[str, Any],
+    profile_id: str,
+    session_id: str,
+    source_event_ids: list[uuid.UUID],
+    source_message_ids: list[uuid.UUID],
+    default_topic: str,
+    model_provider: str,
+    model_name: str,
+    prompt_version: str,
+) -> None:
+    if candidate.action == "skip_noise":
+        await _record_capture_audit(
+            session,
+            profile_id=profile_id,
+            session_id=session_id,
+            event_type="capture_classifier_skip",
+            audit_payload=_candidate_audit_payload(candidate, index),
+        )
+        return
+
+    if candidate.action != "auto_save" or candidate.kind in {"entity", "relationship", "summary"}:
+        await _record_capture_audit(
+            session,
+            profile_id=profile_id,
+            session_id=session_id,
+            event_type="capture_candidate_needs_review",
+            audit_payload={
+                **_candidate_audit_payload(candidate, index),
+                "review_reason": candidate.review_reason
+                or f"Action {candidate.action} for kind {candidate.kind} is not auto-promoted in PR1.",
+            },
+        )
+        return
+
+    statement = _candidate_storage_text(candidate.statement, candidate.sensitivity)[:900]
+    if not statement.strip():
+        await _record_capture_audit(
+            session,
+            profile_id=profile_id,
+            session_id=session_id,
+            event_type="capture_candidate_needs_review",
+            audit_payload={
+                **_candidate_audit_payload(candidate, index),
+                "review_reason": "Candidate statement became empty after redaction.",
+            },
+        )
+        return
+
+    metadata = {
+        "capture_mode": payload.get("mode", "aggressive"),
+        "capture_classifier": model_provider,
+        "capture_model": model_name,
+        "capture_prompt_version": prompt_version,
+        "capture_action": candidate.action,
+        "capture_kind": candidate.kind,
+        "importance": candidate.importance,
+        "sensitivity": candidate.sensitivity,
+        "risk": candidate.risk,
+    }
+    candidate_source_event_ids = _merge_uuid_lists(source_event_ids, candidate.source_event_ids)
+    candidate_source_message_ids = _merge_uuid_lists(source_message_ids, candidate.source_message_ids)
+
+    if candidate.kind == "decision":
+        await svc.remember(
+            session,
+            RememberRequest(
+                profile_id=profile_id,
+                session_id=session_id,
+                kind="decision",
+                statement=statement,
+                project=candidate.project,
+                topic=candidate.topic or default_topic,
+                rationale=candidate.rationale,
+                confidence=candidate.confidence or 0.9,
+                source_event_ids=candidate_source_event_ids,
+                source_message_ids=candidate_source_message_ids,
+                metadata=metadata,
+            ),
+        )
+    else:
+        subject = _candidate_storage_text(candidate.subject or candidate.kind, candidate.sensitivity)
+        predicate = _candidate_storage_text(
+            candidate.predicate or _default_predicate_for_candidate(candidate),
+            candidate.sensitivity,
+        )
+        obj = _candidate_storage_text(candidate.object or _fact_object(statement), candidate.sensitivity)
+        await svc.remember(
+            session,
+            RememberRequest(
+                profile_id=profile_id,
+                session_id=session_id,
+                kind="fact",
+                subject=subject,
+                predicate=predicate,
+                object=obj,
+                statement=statement,
+                project=candidate.project,
+                topic=candidate.topic or default_topic,
+                confidence=candidate.confidence or 0.82,
+                source_event_ids=candidate_source_event_ids,
+                source_message_ids=candidate_source_message_ids,
+                metadata=metadata,
+            ),
+        )
+
+    event_type = "capture_secret_candidate_saved" if candidate.sensitivity == "secret" else "capture_candidate_auto_saved"
+    await _record_capture_audit(
+        session,
+        profile_id=profile_id,
+        session_id=session_id,
+        event_type=event_type,
+        audit_payload={
+            **_candidate_audit_payload(candidate, index),
+            "stored_kind": "decision" if candidate.kind == "decision" else "fact",
+        },
+    )
+    if event_type == "capture_secret_candidate_saved":
+        await _record_capture_audit(
+            session,
+            profile_id=profile_id,
+            session_id=session_id,
+            event_type="capture_candidate_auto_saved",
+            audit_payload={
+                **_candidate_audit_payload(candidate, index),
+                "stored_kind": "fact",
+                "secret": True,
+            },
+        )
+
+
+def _normalize_capture_output(
+    output: MemoryCaptureResult | MemoryCaptureDecision,
+    *,
+    default_project: str | None,
+    default_topic: str | None,
+) -> MemoryCaptureResult:
+    if isinstance(output, MemoryCaptureResult):
+        return output
+    action = "auto_save" if output.save else "skip_noise"
+    statement = output.statement or output.rationale or "Classifier skipped this turn."
+    sensitivity = "secret" if str(output.sensitivity).lower() == "secret" else "internal"
+    candidate = MemoryCandidate(
+        action=action,
+        kind=output.kind,
+        statement=statement,
+        subject=output.subject,
+        predicate=output.predicate,
+        object=output.object,
+        project=output.project or default_project,
+        topic=output.topic or default_topic,
+        confidence=output.confidence,
+        importance=output.confidence,
+        sensitivity=sensitivity,
+        risk="high" if sensitivity == "secret" else "low",
+        rationale=output.rationale or ("Legacy classifier save." if output.save else "Legacy classifier skip."),
+    )
+    return MemoryCaptureResult(
+        candidates=[candidate],
+        skipped_reason=None if output.save else candidate.rationale,
+        prompt_version="capture-v1-compatible",
+    )
+
+
+async def _record_capture_audit(
+    session: AsyncSession,
+    *,
+    profile_id: str,
+    session_id: str,
+    event_type: str,
+    audit_payload: dict[str, Any],
+) -> None:
+    safe_payload, redaction_count = RedactionService().redact_dict(
+        {"event_type": event_type, **audit_payload}
+    )
+    if redaction_count:
+        safe_payload["redaction_count"] = redaction_count
+    await IngestService(profile_id=profile_id).ingest_event(
+        session,
+        GenericEventIn(
+            profile_id=profile_id,
+            session_id=session_id,
+            event_type=event_type,
+            source="memory_capture_classifier",
+            actor="siqueira-capture",
+            agent_context="primary",
+            payload=safe_payload,
+        ),
+    )
+
+
+def _candidate_audit_payload(candidate: MemoryCandidate, index: int) -> dict[str, Any]:
+    preview = redact(candidate.statement).redacted[:240]
+    return {
+        "candidate_index": index,
+        "action": candidate.action,
+        "kind": candidate.kind,
+        "statement_preview": preview,
+        "project": candidate.project,
+        "topic": candidate.topic,
+        "confidence": candidate.confidence,
+        "importance": candidate.importance,
+        "sensitivity": candidate.sensitivity,
+        "risk": candidate.risk,
+        "reason": candidate.rationale,
+    }
+
+
+def _default_predicate_for_candidate(candidate: MemoryCandidate) -> str:
+    if candidate.kind == "secret":
+        return "stored_as_secret"
+    if candidate.kind == "preference":
+        return "prefers"
+    return "captured"
+
+
+def _candidate_storage_text(text: str, sensitivity: str) -> str:
+    redaction = redact(text)
+    if sensitivity == "secret":
+        return redaction.redacted
+    if any(finding.kind != "seed_phrase" for finding in redaction.findings):
+        return redaction.redacted
+    return text
+
+
+def _merge_uuid_lists(left: list[uuid.UUID], right: list[uuid.UUID]) -> list[uuid.UUID]:
+    return [uuid.UUID(x) for x in sorted({str(item) for item in [*left, *right]})]
 
 
 def _heuristic_capture(

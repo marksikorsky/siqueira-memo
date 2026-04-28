@@ -232,6 +232,7 @@ class SiqueiraMemoProvider:
                         mode=args.get("mode", "balanced"),
                         limit=int(args.get("limit", 15)),
                         include_sources=bool(args.get("include_sources", True)),
+                        allow_secret_recall=bool(args.get("allow_secret_recall", False)),
                         session_id=self._session_id or None,
                     )
                     embedding = build_embedding_provider(self._settings)
