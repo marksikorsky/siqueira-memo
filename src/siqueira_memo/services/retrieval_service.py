@@ -64,6 +64,7 @@ from siqueira_memo.services.relationship_service import RelationshipService
 from siqueira_memo.services.retrieval_fusion import (
     ChunkScoringInput,
     ScoredChunk,
+    entity_match_terms,
     filter_non_matching_chunks,
     has_temporal_intent,
     lexical_overlap_score,
@@ -209,8 +210,9 @@ class RetrievalService:
                 chunk_inputs,
                 query=request.query,
                 embedding_provider=self.embedding_provider,
+                entities=request.entities,
             )
-            matched = filter_non_matching_chunks(scored, query=request.query)
+            matched = filter_non_matching_chunks(scored, query=request.query, entities=request.entities)
             matched.sort(key=lambda c: c.score.final_score, reverse=True)
             kept = matched[: limits["chunks"]]
             rejected_count += max(0, len(scored) - len(kept))
@@ -460,19 +462,52 @@ class RetrievalService:
             stmt = stmt.where(Chunk.sensitivity.notin_({"sensitive", "secret"}))
 
         if tokens:
+            rows: list[Chunk] = []
             lexical_stmt = stmt.where(
                 or_(*(Chunk.chunk_text.ilike(f"%{token}%") for token in tokens))
             ).order_by(Chunk.created_at.desc(), Chunk.id.asc())
-            rows = list((await session.execute(lexical_stmt.limit(limit * 8))).scalars().all())
+            rows.extend(list((await session.execute(lexical_stmt.limit(limit * 8))).scalars().all()))
             rows.extend(await self._query_embedding_chunk_rows(session, request, limit=limit * 4))
-            return _dedupe_chunks(rows)
+            rows.extend(await self._query_entity_chunk_rows(session, request, limit=limit * 8))
+            rows = _dedupe_chunks(rows)
+            if request.entities:
+                rows = [row for row in rows if _chunk_matches_requested_entities(row, request.entities)]
+            return rows
 
         rows = list(
             (await session.execute(stmt.order_by(Chunk.created_at.desc(), Chunk.id.asc()).limit(limit * 4)))
             .scalars()
             .all()
         )
+        rows.extend(await self._query_entity_chunk_rows(session, request, limit=limit * 8))
+        rows = _dedupe_chunks(rows)
+        if request.entities:
+            rows = [row for row in rows if _chunk_matches_requested_entities(row, request.entities)]
         return rows
+
+    async def _query_entity_chunk_rows(
+        self, session: AsyncSession, request: RecallRequest, *, limit: int
+    ) -> list[Chunk]:
+        if not request.entities:
+            return []
+        stmt = select(Chunk).where(Chunk.profile_id == self.profile_id)
+        if request.project is not None:
+            stmt = stmt.where(Chunk.project == request.project)
+        if request.topic is not None:
+            stmt = stmt.where(Chunk.topic == request.topic)
+        if not request.allow_secret_recall:
+            stmt = stmt.where(Chunk.sensitivity.notin_({"sensitive", "secret"}))
+        if not any(normalize_text(entity).strip() for entity in request.entities):
+            return []
+        # Correctness beats cleverness here: substring SQL prefilters can be
+        # saturated by api-gateway/public-api style false positives and silently
+        # miss an older exact entity=["api"] chunk. Until Phase 7 introduces a
+        # proper entity index/search service, scan the already scoped chunk rows
+        # and apply exact normalized matching before limiting.
+        stmt = stmt.order_by(Chunk.created_at.desc(), Chunk.id.asc())
+        rows = list((await session.execute(stmt)).scalars().all())
+        exact_matches = [row for row in rows if _chunk_matches_requested_entities(row, request.entities)]
+        return exact_matches[:limit]
 
     async def _query_embedding_chunk_rows(
         self, session: AsyncSession, request: RecallRequest, *, limit: int
@@ -510,6 +545,7 @@ class RetrievalService:
                 tokenizer_name=chunk.tokenizer_name,
                 project=chunk.project,
                 topic=chunk.topic,
+                entities=list(chunk.entities or []),
                 sensitivity=chunk.sensitivity,
                 created_at=chunk.created_at,
                 extra_metadata=dict(chunk.extra_metadata or {}),
@@ -974,6 +1010,10 @@ def _event_search_text(event: MemoryEvent) -> str:
         return ""
     payload_text = " ".join(str(value) for value in _safe_event_payload(event).values())
     return " ".join(filter(None, [event.event_type, payload_text]))
+
+
+def _chunk_matches_requested_entities(chunk: Chunk, requested_entities: Sequence[str]) -> bool:
+    return bool(entity_match_terms(list(chunk.entities or []), requested_entities))
 
 
 def _event_to_source_ref(event: MemoryEvent, tokens: Sequence[str]) -> SourceRef:

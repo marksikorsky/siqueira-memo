@@ -669,6 +669,7 @@ async def test_recall_chunks_include_fusion_lane_explanation_and_log_metadata(se
     assert log.extra_metadata["retrieval_fusion"]["chunk_score_fields"] == [
         "lexical_score",
         "vector_score",
+        "entity_score",
         "recency_score",
         "final_score",
     ]
@@ -781,6 +782,142 @@ async def test_recall_lexical_lane_finds_relevant_chunk_beyond_recent_window(ses
     assert result.context_pack.chunks
     assert result.context_pack.chunks[0].id == old_relevant.id
     assert result.context_pack.chunks[0].retrieval_lane == "lexical"
+
+
+@pytest.mark.asyncio
+async def test_recall_entity_lane_uses_explicit_chunk_entities_over_lexical_noise(session):
+    profile = "p1"
+    relevant = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="The OpenClaw environment template hides internal billing proxy settings.",
+        token_count=9,
+        tokenizer_name="test",
+        project="clawik",
+        topic="admin",
+        entities=["clawik-admin"],
+        created_at=datetime.now(UTC) - timedelta(days=180),
+    )
+    lexical_noise = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="Current admin config notes for an unrelated dashboard.",
+        token_count=8,
+        tokenizer_name="test",
+        project="clawik",
+        topic="admin",
+        entities=["random-dashboard"],
+        created_at=datetime.now(UTC),
+    )
+    session.add_all([relevant, lexical_noise])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(
+            query="current admin config",
+            project="clawik",
+            entities=["clawik-admin"],
+            types=["chunks"],
+            mode="balanced",
+        ),
+    )
+
+    assert result.context_pack.chunks
+    assert [chunk.id for chunk in result.context_pack.chunks] == [relevant.id]
+    top = result.context_pack.chunks[0]
+    assert top.retrieval_lane == "entity"
+    assert "entity match" in (top.retrieval_explanation or "")
+    assert top.score_breakdown["entity_score"] > 0
+
+
+@pytest.mark.asyncio
+async def test_recall_entity_lane_respects_project_filter(session):
+    profile = "p1"
+    clawik = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="Tailnet exposure uses Caddy Basic Auth for the private dashboard.",
+        token_count=10,
+        tokenizer_name="test",
+        project="clawik",
+        topic="infra",
+        entities=["hermes-tailnet"],
+        created_at=datetime.now(UTC) - timedelta(days=90),
+    )
+    shannon = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="Tailnet deployment config for another project.",
+        token_count=7,
+        tokenizer_name="test",
+        project="shannon",
+        topic="infra",
+        entities=["hermes-tailnet"],
+        created_at=datetime.now(UTC),
+    )
+    session.add_all([clawik, shannon])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(
+            query="deployment config",
+            project="clawik",
+            entities=["hermes-tailnet"],
+            types=["chunks"],
+            mode="balanced",
+        ),
+    )
+
+    assert result.context_pack.chunks
+    assert [chunk.id for chunk in result.context_pack.chunks] == [clawik.id]
+    assert result.context_pack.chunks[0].retrieval_lane == "entity"
+
+
+@pytest.mark.asyncio
+async def test_recall_entity_lane_does_not_lose_exact_match_to_substring_saturation(session):
+    profile = "p1"
+    recent_false_positives = [
+        Chunk(
+            profile_id=profile,
+            source_type=CHUNK_SOURCE_MESSAGE,
+            source_id=uuid.uuid4(),
+            chunk_text=f"Recent public API gateway note {index}.",
+            token_count=6,
+            tokenizer_name="test",
+            project="clawik",
+            entities=["api-gateway"],
+            created_at=datetime.now(UTC) - timedelta(minutes=index),
+        )
+        for index in range(130)
+    ]
+    exact_old = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="The generic API entity owns the canonical integration note.",
+        token_count=9,
+        tokenizer_name="test",
+        project="clawik",
+        entities=["api"],
+        created_at=datetime.now(UTC) - timedelta(days=365),
+    )
+    session.add_all([*recent_false_positives, exact_old])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="", project="clawik", entities=["api"], types=["chunks"], mode="fast"),
+    )
+
+    assert result.context_pack.chunks
+    assert [chunk.id for chunk in result.context_pack.chunks] == [exact_old.id]
+    assert result.context_pack.chunks[0].retrieval_lane == "entity"
 
 
 @pytest.mark.asyncio

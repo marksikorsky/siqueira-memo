@@ -27,6 +27,7 @@ class ChunkLike(Protocol):
     tokenizer_name: str
     project: str | None
     topic: str | None
+    entities: list[str]
     sensitivity: str
     created_at: datetime | None
     extra_metadata: dict[str, object]
@@ -43,9 +44,10 @@ class ChunkScoringInput:
     tokenizer_name: str
     project: str | None
     topic: str | None
-    sensitivity: str
-    created_at: datetime | None
-    extra_metadata: dict[str, object]
+    entities: list[str] = field(default_factory=list)
+    sensitivity: str = "normal"
+    created_at: datetime | None = None
+    extra_metadata: dict[str, object] = field(default_factory=dict)
     embedding: list[float] | None = None
 
 
@@ -53,16 +55,19 @@ class ChunkScoringInput:
 class RetrievalScore:
     lexical_score: float = 0.0
     vector_score: float = 0.0
+    entity_score: float = 0.0
     recency_score: float = 0.0
     final_score: float = 0.0
     source_lane: str = "recency"
     explanation: str = "ranked by recency"
     matched_terms: list[str] = field(default_factory=list)
+    matched_entities: list[str] = field(default_factory=list)
 
     def as_breakdown(self) -> dict[str, float]:
         return {
             "lexical_score": round(self.lexical_score, 4),
             "vector_score": round(self.vector_score, 4),
+            "entity_score": round(self.entity_score, 4),
             "recency_score": round(self.recency_score, 4),
             "final_score": round(self.final_score, 4),
         }
@@ -172,6 +177,23 @@ def lexical_overlap_score(tokens: Sequence[str], text: str) -> float:
     return sum(1.0 for token in tokens if token in normalized) / max(1, len(tokens))
 
 
+def entity_match_terms(candidate_entities: Sequence[str], requested_entities: Sequence[str]) -> list[str]:
+    """Return requested entity names that exactly match candidate entity metadata.
+
+    Entity retrieval is intentionally exact after normalization. Substring matching
+    would turn explicit entity filters into a pollution source (e.g. ``api``
+    matching every API-ish note).
+    """
+
+    candidate_norms = {normalize_text(entity).strip() for entity in candidate_entities if entity}
+    matches: list[str] = []
+    for entity in requested_entities:
+        normalized = normalize_text(entity).strip()
+        if normalized and normalized in candidate_norms:
+            matches.append(entity)
+    return matches
+
+
 def recency_weight(created_at: datetime | None) -> float:
     if created_at is None:
         return 0.0
@@ -186,8 +208,10 @@ def score_chunks(
     *,
     query: str,
     embedding_provider: EmbeddingProvider,
+    entities: Sequence[str] | None = None,
 ) -> list[ScoredChunk]:
     tokens = set(tokenize_query(query))
+    requested_entities = [entity for entity in entities or [] if normalize_text(entity).strip()]
     embedded_query = embedding_provider.embed(query) if tokens else None
     scored: list[ScoredChunk] = []
 
@@ -205,10 +229,17 @@ def score_chunks(
             vector_values = [float(v) for v in emb if isinstance(v, (int, float))]
             vector_score = max(0.0, cosine(embedded_query, vector_values))
 
+        matched_entities = entity_match_terms(getattr(chunk, "entities", []), requested_entities)
+        entity_score = 1.0 if matched_entities else 0.0
         recency_score = recency_weight(chunk.created_at)
-        final_score = lexical_score * 0.55 + vector_score * 0.35 + recency_score * 0.10
+        if requested_entities:
+            final_score = lexical_score * 0.35 + vector_score * 0.25 + entity_score * 0.35 + recency_score * 0.05
+        else:
+            final_score = lexical_score * 0.55 + vector_score * 0.35 + recency_score * 0.10
 
-        if lexical_score >= max(vector_score, 0.01):
+        if entity_score > 0.0 and entity_score >= max(lexical_score, vector_score):
+            lane = "entity"
+        elif lexical_score >= max(vector_score, 0.01):
             lane = "lexical"
         elif vector_score > 0.0:
             lane = "semantic"
@@ -216,6 +247,8 @@ def score_chunks(
             lane = "recency"
 
         explanation_parts: list[str] = []
+        if matched_entities:
+            explanation_parts.append("entity match: " + ", ".join(matched_entities[:8]))
         if matched_terms:
             explanation_parts.append("lexical match: " + ", ".join(matched_terms[:8]))
         if vector_score > 0.0:
@@ -229,11 +262,13 @@ def score_chunks(
                 score=RetrievalScore(
                     lexical_score=lexical_score,
                     vector_score=vector_score,
+                    entity_score=entity_score,
                     recency_score=recency_score,
                     final_score=final_score,
                     source_lane=lane,
                     explanation="; ".join(explanation_parts) or "ranked by recency",
                     matched_terms=matched_terms,
+                    matched_entities=matched_entities,
                 ),
             )
         )
@@ -241,16 +276,23 @@ def score_chunks(
     return scored
 
 
-def filter_non_matching_chunks(scored: Sequence[ScoredChunk], *, query: str) -> list[ScoredChunk]:
+def filter_non_matching_chunks(
+    scored: Sequence[ScoredChunk], *, query: str, entities: Sequence[str] | None = None
+) -> list[ScoredChunk]:
     """Drop recency-only noise for non-empty queries.
 
     Recency is a boost, not a retrieval lane by itself when the user asked a
     specific query. Without this guard, any recent chunk can leak into recall.
+    Entity matches are allowed when the caller supplied explicit entity scope.
     """
 
-    if not tokenize_query(query):
+    if not tokenize_query(query) and not entities:
         return list(scored)
-    return [item for item in scored if item.score.lexical_score > 0.0 or item.score.vector_score > 0.0]
+    return [
+        item
+        for item in scored
+        if item.score.lexical_score > 0.0 or item.score.vector_score > 0.0 or item.score.entity_score > 0.0
+    ]
 
 
 def summarize_chunk_fusion(scored: Sequence[ScoredChunk]) -> dict[str, object]:
@@ -260,6 +302,7 @@ def summarize_chunk_fusion(scored: Sequence[ScoredChunk]) -> dict[str, object]:
         "chunk_score_fields": [
             "lexical_score",
             "vector_score",
+            "entity_score",
             "recency_score",
             "final_score",
         ],
