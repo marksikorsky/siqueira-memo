@@ -79,6 +79,99 @@ def tokenize_query(query: str) -> list[str]:
     return [t for t in re.findall(r"[\w\-]+", text, flags=re.UNICODE) if len(t) >= 2]
 
 
+_TEMPORAL_QUERY_TERMS = {
+    "latest",
+    "current",
+    "recent",
+    "newest",
+    "актуальный",
+    "актуальная",
+    "актуальное",
+    "актуальные",
+    "текущий",
+    "текущая",
+    "текущее",
+    "текущие",
+    "последний",
+    "последняя",
+    "последнее",
+    "последние",
+    "свежий",
+    "свежая",
+    "свежее",
+    "свежие",
+}
+
+
+def has_temporal_intent(query: str) -> bool:
+    tokens = set(tokenize_query(query))
+    return bool(tokens & _TEMPORAL_QUERY_TERMS)
+
+
+_QUERY_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "about",
+    "did",
+    "do",
+    "does",
+    "for",
+    "from",
+    "how",
+    "in",
+    "is",
+    "of",
+    "on",
+    "or",
+    "our",
+    "the",
+    "to",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "we",
+    "а",
+    "в",
+    "где",
+    "для",
+    "и",
+    "или",
+    "как",
+    "какая",
+    "какие",
+    "какой",
+    "какое",
+    "когда",
+    "на",
+    "по",
+    "про",
+    "у",
+    "что",
+}
+
+
+def temporal_content_tokens(query: str) -> list[str]:
+    return [
+        token
+        for token in tokenize_query(query)
+        if token not in _TEMPORAL_QUERY_TERMS and token not in _QUERY_STOPWORDS
+    ]
+
+
+def lexical_overlap_score(tokens: Sequence[str], text: str) -> float:
+    if not tokens:
+        return 0.0
+    normalized = normalize_text(text)
+    return sum(1.0 for token in tokens if token in normalized) / max(1, len(tokens))
+
+
 def recency_weight(created_at: datetime | None) -> float:
     if created_at is None:
         return 0.0

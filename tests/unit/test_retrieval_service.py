@@ -20,6 +20,7 @@ from siqueira_memo.schemas.recall import RecallRequest
 from siqueira_memo.services.context_pack_service import ContextPackShaper
 from siqueira_memo.services.embedding_service import MockEmbeddingProvider
 from siqueira_memo.services.markdown_export import ExportFilter, export_markdown
+from siqueira_memo.services.retrieval_fusion import has_temporal_intent, temporal_content_tokens
 from siqueira_memo.services.retrieval_service import RetrievalService
 
 
@@ -123,6 +124,340 @@ async def test_recall_detects_conflict_between_active_decisions(session):
     )
     assert result.context_pack.conflicts, "expected polarity conflict between decisions"
     assert result.context_pack.confidence == "low"
+
+
+@pytest.mark.asyncio
+async def test_recall_latest_decision_uses_temporal_lane_and_explanation(session):
+    profile = "p1"
+    event = MemoryEvent(
+        event_type="decision_recorded",
+        source="test",
+        actor="test",
+        profile_id=profile,
+        payload={"event_type": "decision_recorded"},
+    )
+    session.add(event)
+    await session.flush()
+    older = Decision(
+        profile_id=profile,
+        topic="deployment target",
+        decision="Deploy Siqueira API to the old blue cluster",
+        context="old rollout",
+        rationale="legacy deployment target",
+        canonical_key="dec-deploy-blue",
+        status=STATUS_ACTIVE,
+        decided_at=datetime.now(UTC) - timedelta(days=60),
+        source_event_ids=[event.id],
+        extractor_name="manual",
+    )
+    newer = Decision(
+        profile_id=profile,
+        topic="deployment target",
+        decision="Deploy Siqueira API to the green cluster",
+        context="new rollout",
+        rationale="latest deployment target",
+        canonical_key="dec-deploy-green",
+        status=STATUS_ACTIVE,
+        decided_at=datetime.now(UTC) - timedelta(days=1),
+        source_event_ids=[event.id],
+        extractor_name="manual",
+    )
+    session.add_all([older, newer])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="latest deployment target", types=["decisions"], mode="balanced"),
+    )
+
+    assert result.context_pack.decisions
+    top = result.context_pack.decisions[0]
+    assert top.id == newer.id
+    assert top.retrieval_lane == "temporal"
+    assert "latest" in (top.retrieval_explanation or "")
+    assert top.score_breakdown["recency_score"] > 0
+
+
+@pytest.mark.asyncio
+async def test_recall_latest_fact_prefers_newer_valid_from_over_higher_confidence(session):
+    profile = "p1"
+    event = MemoryEvent(
+        event_type="fact_extracted",
+        source="test",
+        actor="test",
+        profile_id=profile,
+        payload={"event_type": "fact_extracted"},
+    )
+    session.add(event)
+    await session.flush()
+    older = Fact(
+        profile_id=profile,
+        subject="Siqueira deployment",
+        predicate="region",
+        object="us-east",
+        statement="Siqueira deployment region was us-east.",
+        canonical_key="fact-deploy-region-old",
+        status=STATUS_ACTIVE,
+        confidence=0.99,
+        valid_from=datetime.now(UTC) - timedelta(days=90),
+        source_event_ids=[event.id],
+        topic="deployment",
+        extractor_name="manual",
+    )
+    newer = Fact(
+        profile_id=profile,
+        subject="Siqueira deployment",
+        predicate="region",
+        object="eu-west",
+        statement="Siqueira deployment region is eu-west.",
+        canonical_key="fact-deploy-region-new",
+        status=STATUS_ACTIVE,
+        confidence=0.70,
+        valid_from=datetime.now(UTC) - timedelta(days=2),
+        source_event_ids=[event.id],
+        topic="deployment",
+        extractor_name="manual",
+    )
+    session.add_all([older, newer])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="latest deployment region", types=["facts"], mode="balanced"),
+    )
+
+    assert result.context_pack.facts
+    top = result.context_pack.facts[0]
+    assert top.id == newer.id
+    assert top.object == "eu-west"
+    assert top.retrieval_lane == "temporal"
+    assert "latest" in (top.retrieval_explanation or "")
+    assert top.score_breakdown["recency_score"] > 0
+
+
+@pytest.mark.asyncio
+async def test_recall_temporal_fact_filters_unrelated_recent_noise(session):
+    profile = "p1"
+    event = MemoryEvent(
+        event_type="fact_extracted",
+        source="test",
+        actor="test",
+        profile_id=profile,
+        payload={"event_type": "fact_extracted"},
+    )
+    session.add(event)
+    await session.flush()
+    relevant = Fact(
+        profile_id=profile,
+        subject="Siqueira deployment",
+        predicate="region",
+        object="sa-east",
+        statement="Siqueira deployment region is sa-east.",
+        canonical_key="fact-deploy-region-relevant",
+        status=STATUS_ACTIVE,
+        confidence=0.80,
+        valid_from=datetime.now(UTC) - timedelta(days=90),
+        source_event_ids=[event.id],
+        topic="deployment",
+        extractor_name="manual",
+    )
+    unrelated_recent = Fact(
+        profile_id=profile,
+        subject="Coffee preference",
+        predicate="milk",
+        object="none",
+        statement="Coffee preference is black with no milk.",
+        canonical_key="fact-coffee-recent",
+        status=STATUS_ACTIVE,
+        confidence=0.99,
+        valid_from=datetime.now(UTC) - timedelta(hours=1),
+        source_event_ids=[event.id],
+        topic="personal",
+        extractor_name="manual",
+    )
+    session.add_all([unrelated_recent, relevant])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="latest deployment region", types=["facts"], mode="balanced"),
+    )
+
+    ids = [fact.id for fact in result.context_pack.facts]
+    assert ids
+    assert ids[0] == relevant.id
+    assert unrelated_recent.id not in ids
+
+
+@pytest.mark.asyncio
+async def test_recall_temporal_fact_finds_relevant_row_beyond_recent_window(session):
+    profile = "p1"
+    event = MemoryEvent(
+        event_type="fact_extracted",
+        source="test",
+        actor="test",
+        profile_id=profile,
+        payload={"event_type": "fact_extracted"},
+    )
+    session.add(event)
+    await session.flush()
+    noise = [
+        Fact(
+            profile_id=profile,
+            subject=f"Noise {index}",
+            predicate="value",
+            object="irrelevant",
+            statement=f"Recent unrelated noise fact {index}.",
+            canonical_key=f"fact-noise-{index}",
+            status=STATUS_ACTIVE,
+            confidence=0.95,
+            valid_from=datetime.now(UTC) - timedelta(minutes=index),
+            source_event_ids=[event.id],
+            topic="noise",
+            extractor_name="manual",
+        )
+        for index in range(170)
+    ]
+    relevant = Fact(
+        profile_id=profile,
+        subject="Siqueira deployment",
+        predicate="region",
+        object="ap-south",
+        statement="Siqueira deployment region is ap-south.",
+        canonical_key="fact-deploy-region-window",
+        status=STATUS_ACTIVE,
+        confidence=0.80,
+        valid_from=datetime.now(UTC) - timedelta(days=365),
+        source_event_ids=[event.id],
+        topic="deployment",
+        extractor_name="manual",
+    )
+    session.add_all([*noise, relevant])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="latest deployment region", types=["facts"], mode="balanced"),
+    )
+
+    assert result.context_pack.facts
+    assert result.context_pack.facts[0].id == relevant.id
+
+
+def test_temporal_intent_does_not_trigger_for_ambiguous_last_or_actual_queries():
+    assert has_temporal_intent("what is Mark's last name?") is False
+    assert has_temporal_intent("actual error from deployment logs") is False
+    assert has_temporal_intent("latest deployment decision") is True
+    assert temporal_content_tokens("what is the current support email") == ["support", "email"]
+
+
+@pytest.mark.asyncio
+async def test_recall_temporal_fact_requires_specific_content_under_partial_noise(session):
+    profile = "p1"
+    event = MemoryEvent(
+        event_type="fact_extracted",
+        source="test",
+        actor="test",
+        profile_id=profile,
+        payload={"event_type": "fact_extracted"},
+    )
+    session.add(event)
+    await session.flush()
+    noise = [
+        Fact(
+            profile_id=profile,
+            subject=f"Siqueira deployment status {index}",
+            predicate="status",
+            object="noise",
+            statement=f"Siqueira deployment status noise {index}.",
+            canonical_key=f"fact-deploy-status-noise-{index}",
+            status=STATUS_ACTIVE,
+            confidence=0.95,
+            valid_from=datetime.now(UTC) - timedelta(minutes=index),
+            source_event_ids=[event.id],
+            topic="deployment",
+            extractor_name="manual",
+        )
+        for index in range(170)
+    ]
+    relevant = Fact(
+        profile_id=profile,
+        subject="Siqueira deployment",
+        predicate="region",
+        object="ap-south",
+        statement="Siqueira deployment region is ap-south.",
+        canonical_key="fact-deploy-region-specific-window",
+        status=STATUS_ACTIVE,
+        confidence=0.80,
+        valid_from=datetime.now(UTC) - timedelta(days=365),
+        source_event_ids=[event.id],
+        topic="deployment",
+        extractor_name="manual",
+    )
+    session.add_all([*noise, relevant])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="latest deployment region", types=["facts"], mode="balanced"),
+    )
+
+    assert result.context_pack.facts
+    assert result.context_pack.facts[0].id == relevant.id
+    assert all("status noise" not in fact.statement for fact in result.context_pack.facts)
+
+
+@pytest.mark.asyncio
+async def test_recall_latest_fact_uses_created_at_when_valid_from_missing(session):
+    profile = "p1"
+    event = MemoryEvent(
+        event_type="fact_extracted",
+        source="test",
+        actor="test",
+        profile_id=profile,
+        payload={"event_type": "fact_extracted"},
+    )
+    session.add(event)
+    await session.flush()
+    older = Fact(
+        profile_id=profile,
+        subject="Support email",
+        predicate="address",
+        object="old@example.com",
+        statement="Support email address is old@example.com.",
+        canonical_key="fact-support-email-old",
+        status=STATUS_ACTIVE,
+        confidence=0.99,
+        created_at=datetime.now(UTC) - timedelta(days=30),
+        source_event_ids=[event.id],
+        topic="support",
+        extractor_name="manual",
+    )
+    newer = Fact(
+        profile_id=profile,
+        subject="Support email",
+        predicate="address",
+        object="new@example.com",
+        statement="Support email address is new@example.com.",
+        canonical_key="fact-support-email-new",
+        status=STATUS_ACTIVE,
+        confidence=0.70,
+        created_at=datetime.now(UTC) - timedelta(hours=1),
+        source_event_ids=[event.id],
+        topic="support",
+        extractor_name="manual",
+    )
+    session.add_all([older, newer])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="what is the current support email", types=["facts"], mode="balanced"),
+    )
+
+    assert result.context_pack.facts
+    assert result.context_pack.facts[0].id == newer.id
+    assert result.context_pack.facts[0].object == "new@example.com"
 
 
 @pytest.mark.asyncio

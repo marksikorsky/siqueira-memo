@@ -71,6 +71,7 @@ class RecallDecision(MemoBase):
     secret_masked: bool = False
     retrieval_lane: str = "structured"
     retrieval_explanation: str | None = None
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
     sources: list[SourceRef] = Field(default_factory=list)
 
 
@@ -92,6 +93,7 @@ class RecallFact(MemoBase):
     secret_masked: bool = False
     retrieval_lane: str = "structured"
     retrieval_explanation: str | None = None
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
     sources: list[SourceRef] = Field(default_factory=list)
 
 

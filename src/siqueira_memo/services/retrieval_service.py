@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from siqueira_memo.logging import get_logger
@@ -63,8 +63,12 @@ from siqueira_memo.services.retrieval_fusion import (
     ChunkScoringInput,
     ScoredChunk,
     filter_non_matching_chunks,
+    has_temporal_intent,
+    lexical_overlap_score,
+    recency_weight,
     score_chunks,
     summarize_chunk_fusion,
+    temporal_content_tokens,
     tokenize_query,
 )
 from siqueira_memo.services.secret_policy import (
@@ -151,9 +155,16 @@ class RetrievalService:
             )
             candidates_count += len(decision_rows)
             for decision in decision_rows:
+                lane, explanation, score_breakdown = self._decision_retrieval_metadata(
+                    decision, request=request, tokens=tokens
+                )
                 decisions_out.append(
                     self._decision_to_schema(
-                        decision, allow_secret_recall=request.allow_secret_recall
+                        decision,
+                        allow_secret_recall=request.allow_secret_recall,
+                        retrieval_lane=lane,
+                        retrieval_explanation=explanation,
+                        score_breakdown=score_breakdown,
                     )
                 )
 
@@ -162,8 +173,17 @@ class RetrievalService:
             fact_rows = await self._query_facts(session, request, tokens, limits["facts"])
             candidates_count += len(fact_rows)
             for fact in fact_rows:
+                lane, explanation, score_breakdown = self._fact_retrieval_metadata(
+                    fact, request=request, tokens=tokens
+                )
                 facts_out.append(
-                    self._fact_to_schema(fact, allow_secret_recall=request.allow_secret_recall)
+                    self._fact_to_schema(
+                        fact,
+                        allow_secret_recall=request.allow_secret_recall,
+                        retrieval_lane=lane,
+                        retrieval_explanation=explanation,
+                        score_breakdown=score_breakdown,
+                    )
                 )
 
         fusion_metadata: dict[str, object] = {
@@ -266,7 +286,10 @@ class RetrievalService:
                         "topic": request.topic,
                         "entities": list(request.entities),
                     },
-                    "retrieval_fusion": fusion_metadata,
+                    "retrieval_fusion": {
+                        **fusion_metadata,
+                        "structured_lane_counts": _structured_lane_counts(decisions_out, facts_out),
+                    },
                 },
             )
         )
@@ -296,24 +319,52 @@ class RetrievalService:
         if request.topic is not None:
             stmt = stmt.where(Decision.topic == request.topic)
 
-        # active first, most recent first.
+        query_tokens = temporal_content_tokens(request.query) if has_temporal_intent(request.query) else list(tokens)
+        if query_tokens and request.topic is None:
+            columns = [
+                Decision.decision,
+                Decision.topic,
+                Decision.rationale,
+                Decision.context,
+                Decision.project,
+            ]
+            per_token_filters = [
+                or_(*(column.ilike(f"%{token}%") for column in columns))
+                for token in query_tokens
+            ]
+            stmt = stmt.where(
+                and_(*per_token_filters)
+                if has_temporal_intent(request.query)
+                else or_(*per_token_filters)
+            )
+
         stmt = stmt.order_by(
-            Decision.status == STATUS_ACTIVE,  # TRUE sorts after FALSE in ASC; see below
+            (Decision.status == STATUS_ACTIVE).desc(),
             Decision.decided_at.desc(),
-        ).limit(limit * 4)
+            Decision.id.asc(),
+        ).limit(limit * 8)
 
         rows = list((await session.execute(stmt)).scalars().all())
         rows = [row for row in rows if _secret_allowed(row.extra_metadata, request)]
         if tokens:
-            # Rank by token overlap with decision/topic/rationale.
-            def match(d: Decision) -> float:
-                text = " ".join(
-                    filter(None, [d.decision, d.topic, d.rationale, d.context, d.project or ""])
+            if has_temporal_intent(request.query):
+                rows.sort(
+                    key=lambda d: (
+                        d.status == STATUS_ACTIVE,
+                        self._decision_score_breakdown(d, request=request, tokens=tokens)["final_score"],
+                        d.decided_at,
+                    ),
+                    reverse=True,
                 )
-                normalized = normalize_text(text)
-                return sum(1.0 for t in tokens if t in normalized) / max(1, len(tokens))
+            else:
+                # Rank by token overlap with decision/topic/rationale.
+                def match(d: Decision) -> float:
+                    text = " ".join(
+                        filter(None, [d.decision, d.topic, d.rationale, d.context, d.project or ""])
+                    )
+                    return lexical_overlap_score(tokens, text)
 
-            rows.sort(key=lambda d: (d.status == STATUS_ACTIVE, match(d)), reverse=True)
+                rows.sort(key=lambda d: (d.status == STATUS_ACTIVE, match(d)), reverse=True)
         else:
             rows.sort(key=lambda d: (d.status == STATUS_ACTIVE, d.decided_at), reverse=True)
         return rows[:limit]
@@ -333,23 +384,49 @@ class RetrievalService:
             stmt = stmt.where(Fact.project == request.project)
         if request.topic is not None:
             stmt = stmt.where(Fact.topic == request.topic)
+        query_tokens = temporal_content_tokens(request.query) if has_temporal_intent(request.query) else list(tokens)
+        if query_tokens and request.topic is None:
+            columns = [Fact.statement, Fact.subject, Fact.predicate, Fact.object, Fact.topic, Fact.project]
+            per_token_filters = [
+                or_(*(column.ilike(f"%{token}%") for column in columns))
+                for token in query_tokens
+            ]
+            stmt = stmt.where(
+                and_(*per_token_filters)
+                if has_temporal_intent(request.query)
+                else or_(*per_token_filters)
+            )
+        stmt = stmt.order_by(
+            (Fact.status == STATUS_ACTIVE).desc(),
+            func.coalesce(Fact.valid_from, Fact.valid_to, Fact.created_at, Fact.updated_at).desc(),
+            Fact.id.asc(),
+        )
         rows = list((await session.execute(stmt.limit(limit * 8))).scalars().all())
         rows = [row for row in rows if _secret_allowed(row.extra_metadata, request)]
         if tokens:
-            def score(fact: Fact) -> float:
-                text = " ".join(
-                    filter(
-                        None,
-                        [fact.statement, fact.subject, fact.predicate, fact.object, fact.topic or ""],
-                    )
+            if has_temporal_intent(request.query):
+                rows.sort(
+                    key=lambda f: (
+                        f.status == STATUS_ACTIVE,
+                        self._fact_score_breakdown(f, request=request, tokens=tokens)["final_score"],
+                        f.valid_from or f.valid_to or f.created_at or f.updated_at,
+                    ),
+                    reverse=True,
                 )
-                normalized = normalize_text(text)
-                return sum(1.0 for t in tokens if t in normalized) / max(1, len(tokens))
+            else:
+                def score(fact: Fact) -> float:
+                    text = " ".join(
+                        filter(
+                            None,
+                            [fact.statement, fact.subject, fact.predicate, fact.object, fact.topic or ""],
+                        )
+                    )
+                    return lexical_overlap_score(tokens, text)
 
-            rows.sort(
-                key=lambda f: (f.status == STATUS_ACTIVE, score(f), f.confidence),
-                reverse=True,
-            )
+                rows.sort(
+                    key=lambda f: (f.status == STATUS_ACTIVE, score(f), f.confidence),
+                    reverse=True,
+                )
         else:
             rows.sort(key=lambda f: (f.status == STATUS_ACTIVE, f.confidence), reverse=True)
         return rows[:limit]
@@ -537,8 +614,11 @@ class RetrievalService:
             if rel.target_type == "decision" and want_decisions:
                 existing = next((d for d in decisions_out if d.id == rel.target_id), None)
                 if existing is not None:
-                    existing.retrieval_lane = "graph"
-                    existing.retrieval_explanation = rel.explanation
+                    if existing.retrieval_lane == "structured":
+                        existing.retrieval_lane = "graph"
+                        existing.retrieval_explanation = rel.explanation
+                    elif existing.retrieval_explanation:
+                        existing.retrieval_explanation = f"{existing.retrieval_explanation}; related: {rel.explanation}"
                     continue
                 decision_row = (
                     await session.execute(
@@ -561,8 +641,11 @@ class RetrievalService:
             elif rel.target_type == "fact" and want_facts:
                 existing_fact = next((f for f in facts_out if f.id == rel.target_id), None)
                 if existing_fact is not None:
-                    existing_fact.retrieval_lane = "graph"
-                    existing_fact.retrieval_explanation = rel.explanation
+                    if existing_fact.retrieval_lane == "structured":
+                        existing_fact.retrieval_lane = "graph"
+                        existing_fact.retrieval_explanation = rel.explanation
+                    elif existing_fact.retrieval_explanation:
+                        existing_fact.retrieval_explanation = f"{existing_fact.retrieval_explanation}; related: {rel.explanation}"
                     continue
                 fact_row = (
                     await session.execute(
@@ -626,6 +709,81 @@ class RetrievalService:
         return any(is_secret_metadata(decision.extra_metadata) for decision in decisions)
 
     # ------------------------------------------------------------------
+    # Structured retrieval scoring
+    # ------------------------------------------------------------------
+    def _decision_score_breakdown(
+        self, decision: Decision, *, request: RecallRequest, tokens: Sequence[str]
+    ) -> dict[str, float]:
+        text = " ".join(
+            filter(None, [decision.decision, decision.topic, decision.rationale, decision.context, decision.project or ""])
+        )
+        score_tokens = temporal_content_tokens(request.query) if has_temporal_intent(request.query) else list(tokens)
+        lexical_score = lexical_overlap_score(score_tokens, text)
+        recency_score = recency_weight(decision.decided_at)
+        confidence_score = float((decision.extra_metadata or {}).get("confidence") or 0.0)
+        confidence_score = max(0.0, min(1.0, confidence_score))
+        if has_temporal_intent(request.query):
+            final_score = lexical_score * 0.70 + recency_score * 0.20 + confidence_score * 0.10
+        else:
+            final_score = lexical_score * 0.70 + confidence_score * 0.20 + recency_score * 0.10
+        return {
+            "lexical_score": round(lexical_score, 4),
+            "recency_score": round(recency_score, 4),
+            "confidence_score": round(confidence_score, 4),
+            "final_score": round(final_score, 4),
+        }
+
+    def _fact_score_breakdown(
+        self, fact: Fact, *, request: RecallRequest, tokens: Sequence[str]
+    ) -> dict[str, float]:
+        text = " ".join(
+            filter(None, [fact.statement, fact.subject, fact.predicate, fact.object, fact.topic or ""])
+        )
+        score_tokens = temporal_content_tokens(request.query) if has_temporal_intent(request.query) else list(tokens)
+        lexical_score = lexical_overlap_score(score_tokens, text)
+        temporal_anchor = fact.valid_from or fact.valid_to or fact.created_at or fact.updated_at
+        recency_score = recency_weight(temporal_anchor)
+        confidence_score = max(0.0, min(1.0, float(fact.confidence or 0.0)))
+        if has_temporal_intent(request.query):
+            final_score = lexical_score * 0.70 + recency_score * 0.20 + confidence_score * 0.10
+        else:
+            final_score = lexical_score * 0.60 + confidence_score * 0.30 + recency_score * 0.10
+        return {
+            "lexical_score": round(lexical_score, 4),
+            "recency_score": round(recency_score, 4),
+            "confidence_score": round(confidence_score, 4),
+            "final_score": round(final_score, 4),
+        }
+
+    def _decision_retrieval_metadata(
+        self, decision: Decision, *, request: RecallRequest, tokens: Sequence[str]
+    ) -> tuple[str, str | None, dict[str, float]]:
+        score_breakdown = self._decision_score_breakdown(decision, request=request, tokens=tokens)
+        if has_temporal_intent(request.query):
+            return (
+                "temporal",
+                "latest/current query ranked this decision by lexical match and recency",
+                score_breakdown,
+            )
+        if score_breakdown["lexical_score"] > 0:
+            return "structured", "structured decision matched query terms", score_breakdown
+        return "structured", None, score_breakdown
+
+    def _fact_retrieval_metadata(
+        self, fact: Fact, *, request: RecallRequest, tokens: Sequence[str]
+    ) -> tuple[str, str | None, dict[str, float]]:
+        score_breakdown = self._fact_score_breakdown(fact, request=request, tokens=tokens)
+        if has_temporal_intent(request.query):
+            return (
+                "temporal",
+                "latest/current query ranked this fact by lexical match and valid_from recency",
+                score_breakdown,
+            )
+        if score_breakdown["lexical_score"] > 0:
+            return "structured", "structured fact matched query terms", score_breakdown
+        return "structured", None, score_breakdown
+
+    # ------------------------------------------------------------------
     # Conversions
     # ------------------------------------------------------------------
     def _decision_to_schema(
@@ -635,6 +793,7 @@ class RetrievalService:
         allow_secret_recall: bool,
         retrieval_lane: str = "structured",
         retrieval_explanation: str | None = None,
+        score_breakdown: dict[str, float] | None = None,
     ) -> RecallDecision:
         metadata = decision.extra_metadata or {}
         secret = is_secret_metadata(metadata)
@@ -658,6 +817,7 @@ class RetrievalService:
             secret_masked=secret,
             retrieval_lane=retrieval_lane,
             retrieval_explanation=retrieval_explanation,
+            score_breakdown=score_breakdown or {},
             sources=[
                 SourceRef(event_id=str(eid))
                 for eid in (decision.source_event_ids or [])
@@ -671,6 +831,7 @@ class RetrievalService:
         allow_secret_recall: bool,
         retrieval_lane: str = "structured",
         retrieval_explanation: str | None = None,
+        score_breakdown: dict[str, float] | None = None,
     ) -> RecallFact:
         metadata = fact.extra_metadata or {}
         secret = is_secret_metadata(metadata)
@@ -693,6 +854,7 @@ class RetrievalService:
             secret_masked=secret,
             retrieval_lane=retrieval_lane,
             retrieval_explanation=retrieval_explanation,
+            score_breakdown=score_breakdown or {},
             sources=[
                 SourceRef(event_id=str(eid)) for eid in (fact.source_event_ids or [])
             ],
@@ -720,6 +882,17 @@ class RetrievalService:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+def _structured_lane_counts(
+    decisions: Sequence[RecallDecision], facts: Sequence[RecallFact]
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for decision in decisions:
+        counts[decision.retrieval_lane] = counts.get(decision.retrieval_lane, 0) + 1
+    for fact in facts:
+        counts[fact.retrieval_lane] = counts.get(fact.retrieval_lane, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def _dedupe_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
     seen: set[uuid.UUID] = set()
     out: list[Chunk] = []
