@@ -199,6 +199,11 @@ async def test_admin_ui_uses_form_login_instead_of_basic_auth_popup(api_client):
     assert "/v1/admin/relationships/list" in html
     assert "/v1/admin/entities/list" in html
     assert "/v1/admin/entities/card" in html
+    assert "/v1/admin/entities/merge-suggestions" in html
+    assert "/v1/admin/entities/merge-review" in html
+    assert "Merge suggestions" in html
+    assert "loadEntityMergeSuggestions" in html
+    assert "reviewEntityMerge" in html
     assert "Entities" in html
     assert "loadEntities" in html
     assert "openEntityCard" in html

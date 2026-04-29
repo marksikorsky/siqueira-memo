@@ -169,6 +169,53 @@ class EntityCardRequest(MemoBase):
     relationship_limit: int = Field(default=40, ge=1, le=200)
 
 
+class EntityMergeSuggestionsRequest(MemoBase):
+    profile_id: str | None = None
+    query: str | None = None
+    entity_type: str | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class EntityMergeCandidateItem(MemoBase):
+    entity_id: uuid.UUID
+    name: str
+    entity_type: str
+    aliases: list[str] = Field(default_factory=list)
+    status: str
+
+
+class EntityMergeSuggestionItem(MemoBase):
+    source: EntityMergeCandidateItem
+    target: EntityMergeCandidateItem
+    confidence: float
+    reasons: list[str] = Field(default_factory=list)
+    evidence: list[str] = Field(default_factory=list)
+    shared_tokens: list[str] = Field(default_factory=list)
+
+
+class EntityMergeSuggestionsResponse(MemoBase):
+    suggestions: list[EntityMergeSuggestionItem]
+    total: int
+
+
+class EntityMergeReviewRequest(MemoBase):
+    profile_id: str | None = None
+    action: Literal["merge", "reject"]
+    source_entity_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    reason: str | None = None
+
+
+class EntityMergeReviewResponse(MemoBase):
+    action: str
+    source_entity_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    status: str
+    moved_aliases: int = 0
+    moved_relationships: int = 0
+    event_id: uuid.UUID | None = None
+
+
 class EntityListRequest(MemoBase):
     profile_id: str | None = None
     query: str | None = None

@@ -19,7 +19,12 @@ from siqueira_memo.db import (
 )
 from siqueira_memo.main import create_app
 from siqueira_memo.models import Entity, EntityAlias, Fact, MemoryRelationship
-from siqueira_memo.models.constants import RELATIONSHIP_BELONGS_TO_ENTITY, STATUS_ACTIVE
+from siqueira_memo.models.constants import (
+    RELATIONSHIP_BELONGS_TO_ENTITY,
+    STATUS_ACTIVE,
+    STATUS_CANDIDATE,
+    STATUS_MERGED,
+)
 from siqueira_memo.utils.canonical import fact_canonical_key, normalize_text
 from siqueira_memo.workers.queue import MemoryJobQueue, set_default_queue
 
@@ -555,3 +560,238 @@ async def test_admin_entities_list_global_scope_only_returns_global_entities(api
     body = resp.json()
     assert body["total"] == 1
     assert [item["name"] for item in body["entities"]] == ["Global Entity"]
+
+
+@pytest.mark.asyncio
+async def test_admin_entity_merge_suggestions_are_profile_scoped_and_reviewable(api_client):
+    client, settings = api_client
+    target_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    other_profile_id = uuid.uuid4()
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        session.add_all(
+            [
+                Entity(
+                    id=target_id,
+                    profile_id="p1",
+                    name="Shannon API",
+                    name_normalized=normalize_text("Shannon API"),
+                    type="api",
+                    aliases=["Shannon API"],
+                    status=STATUS_ACTIVE,
+                    created_at=_now,
+                    updated_at=_now,
+                ),
+                Entity(
+                    id=source_id,
+                    profile_id="p1",
+                    name="shannon-api",
+                    name_normalized=normalize_text("shannon-api"),
+                    type="api",
+                    aliases=["shannon-api"],
+                    status=STATUS_CANDIDATE,
+                    created_at=_now,
+                    updated_at=_now,
+                ),
+                Entity(
+                    id=other_profile_id,
+                    profile_id="other-profile",
+                    name="ShannonAPI",
+                    name_normalized=normalize_text("ShannonAPI"),
+                    type="api",
+                    aliases=["ShannonAPI"],
+                    status=STATUS_ACTIVE,
+                    created_at=_now,
+                    updated_at=_now,
+                ),
+            ]
+        )
+        await session.commit()
+
+    resp = await client.post(
+        "/v1/admin/entities/merge-suggestions",
+        headers=_auth(settings),
+        json={"profile_id": "p1", "limit": 20},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["total"] == 1
+    suggestion = body["suggestions"][0]
+    assert suggestion["target"]["entity_id"] == str(target_id)
+    assert suggestion["source"]["entity_id"] == str(source_id)
+    assert suggestion["confidence"] >= 0.9
+    assert "compact_name_match" in suggestion["reasons"]
+    assert str(other_profile_id) not in resp.text
+    assert "rationale" not in suggestion
+
+    reject = await client.post(
+        "/v1/admin/entities/merge-review",
+        headers=_auth(settings),
+        json={
+            "profile_id": "p1",
+            "action": "reject",
+            "source_entity_id": str(source_id),
+            "target_entity_id": str(target_id),
+            "reason": "not the same API",
+        },
+    )
+    assert reject.status_code == 200, reject.text
+    assert reject.json()["action"] == "reject"
+
+    after_reject = await client.post(
+        "/v1/admin/entities/merge-suggestions",
+        headers=_auth(settings),
+        json={"profile_id": "p1", "limit": 20},
+    )
+    assert after_reject.status_code == 200, after_reject.text
+    assert after_reject.json()["suggestions"] == []
+
+
+@pytest.mark.asyncio
+async def test_admin_entity_merge_review_applies_merge_without_cross_profile_access(api_client):
+    client, settings = api_client
+    target_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+    fact_id = uuid.uuid4()
+    other_profile_id = uuid.uuid4()
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        session.add_all(
+            [
+                Entity(
+                    id=target_id,
+                    profile_id="p1",
+                    name="Claude Code",
+                    name_normalized=normalize_text("Claude Code"),
+                    type="service",
+                    aliases=["Claude Code"],
+                    status=STATUS_ACTIVE,
+                    created_at=_now,
+                    updated_at=_now,
+                ),
+                EntityAlias(
+                    id=uuid.uuid4(),
+                    entity_id=target_id,
+                    profile_id="p1",
+                    alias="Claude Code",
+                    alias_normalized=normalize_text("Claude Code"),
+                    entity_type="service",
+                    status=STATUS_ACTIVE,
+                    created_at=_now,
+                ),
+                Entity(
+                    id=source_id,
+                    profile_id="p1",
+                    name="claude-code",
+                    name_normalized=normalize_text("claude-code"),
+                    type="service",
+                    aliases=["claude-code"],
+                    status=STATUS_CANDIDATE,
+                    created_at=_now,
+                    updated_at=_now,
+                ),
+                EntityAlias(
+                    id=uuid.uuid4(),
+                    entity_id=source_id,
+                    profile_id="p1",
+                    alias="claude-code",
+                    alias_normalized=normalize_text("claude-code"),
+                    entity_type="service",
+                    status=STATUS_ACTIVE,
+                    created_at=_now,
+                ),
+                Entity(
+                    id=other_profile_id,
+                    profile_id="other-profile",
+                    name="Other Claude Code",
+                    name_normalized=normalize_text("Other Claude Code"),
+                    type="service",
+                    aliases=["Other Claude Code"],
+                    status=STATUS_ACTIVE,
+                    created_at=_now,
+                    updated_at=_now,
+                ),
+                Fact(
+                    id=fact_id,
+                    profile_id="p1",
+                    subject="claude-code",
+                    predicate="runs as",
+                    object="CLI",
+                    statement="claude-code runs as CLI.",
+                    canonical_key=fact_canonical_key("claude-code", "runs as", "CLI"),
+                    project="siqueira-memo",
+                    topic="entity-merge",
+                    confidence=0.9,
+                    status=STATUS_ACTIVE,
+                    created_at=_now,
+                    updated_at=_now,
+                ),
+                MemoryRelationship(
+                    id=uuid.uuid4(),
+                    profile_id="p1",
+                    source_type="fact",
+                    source_id=fact_id,
+                    relationship_type=RELATIONSHIP_BELONGS_TO_ENTITY,
+                    target_type="entity",
+                    target_id=source_id,
+                    confidence=0.8,
+                    rationale="source entity edge detail is internal only",
+                    created_by="test",
+                    status=STATUS_ACTIVE,
+                    created_at=_now,
+                    updated_at=_now,
+                ),
+            ]
+        )
+        await session.commit()
+
+    blocked = await client.post(
+        "/v1/admin/entities/merge-review",
+        headers=_auth(settings),
+        json={
+            "profile_id": "p1",
+            "action": "merge",
+            "source_entity_id": str(other_profile_id),
+            "target_entity_id": str(target_id),
+            "reason": "cross profile must fail",
+        },
+    )
+    assert blocked.status_code == 404
+
+    merge = await client.post(
+        "/v1/admin/entities/merge-review",
+        headers=_auth(settings),
+        json={
+            "profile_id": "p1",
+            "action": "merge",
+            "source_entity_id": str(source_id),
+            "target_entity_id": str(target_id),
+            "reason": "admin accepted same compact name",
+        },
+    )
+    assert merge.status_code == 200, merge.text
+    body = merge.json()
+    assert body["action"] == "merge"
+    assert body["source_entity_id"] == str(source_id)
+    assert body["target_entity_id"] == str(target_id)
+    assert body["moved_relationships"] == 1
+
+    listing = await client.post(
+        "/v1/admin/entities/list",
+        headers=_auth(settings),
+        json={"profile_id": "p1", "query": "Claude", "limit": 20},
+    )
+    assert listing.status_code == 200, listing.text
+    listed = listing.json()
+    assert listed["total"] == 1
+    item = listed["entities"][0]
+    assert item["entity_id"] == str(target_id)
+    assert item["aliases"] == ["Claude Code", "claude-code"]
+    assert item["source_count"] == 1
+
+    async with factory() as session:
+        source = await session.get(Entity, source_id)
+        assert source is not None and source.status == STATUS_MERGED
+        assert source.merged_into == target_id

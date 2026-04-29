@@ -31,7 +31,11 @@ from siqueira_memo.models import (
     SessionSummary,
     TopicSummary,
 )
-from siqueira_memo.models.constants import RELATIONSHIP_BELONGS_TO_ENTITY, STATUS_ACTIVE
+from siqueira_memo.models.constants import (
+    RELATIONSHIP_BELONGS_TO_ENTITY,
+    STATUS_ACTIVE,
+    STATUS_MERGED,
+)
 from siqueira_memo.schemas.admin import AdminSearchHit, AdminSearchRequest, AdminSearchResponse
 from siqueira_memo.schemas.audit import AuditEntrySchema, AuditRequest, AuditResponse
 from siqueira_memo.schemas.conflicts import (
@@ -47,12 +51,18 @@ from siqueira_memo.schemas.memory import (
     EntityListItem,
     EntityListRequest,
     EntityListResponse,
+    EntityMergeReviewRequest,
+    EntityMergeReviewResponse,
+    EntityMergeSuggestionItem,
+    EntityMergeSuggestionsRequest,
+    EntityMergeSuggestionsResponse,
     MemoryRelationshipItem,
     MemoryRelationshipListRequest,
     MemoryRelationshipListResponse,
 )
 from siqueira_memo.services.conflict_service import ConflictService
 from siqueira_memo.services.entity_card_service import EntityCardService
+from siqueira_memo.services.entity_merge_service import EntityMergeService
 from siqueira_memo.services.ingest_service import IngestService
 from siqueira_memo.services.memory_version_service import MemoryVersionService
 from siqueira_memo.services.relationship_service import RelationshipService
@@ -117,6 +127,58 @@ def _dedupe_strings(values: list[str | None]) -> list[str]:
     return result
 
 
+@router.post("/entities/merge-suggestions", response_model=EntityMergeSuggestionsResponse)
+async def entity_merge_suggestions(
+    payload: EntityMergeSuggestionsRequest,
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+) -> EntityMergeSuggestionsResponse:
+    """Return source-backed ambiguous entity merge suggestions for admin review."""
+    svc = EntityMergeService(profile_id=payload.profile_id or profile_id, actor="admin_api")
+    suggestions = await svc.suggest(
+        session,
+        query=payload.query,
+        entity_type=payload.entity_type,
+        limit=payload.limit,
+    )
+    return EntityMergeSuggestionsResponse(
+        suggestions=[EntityMergeSuggestionItem.model_validate(asdict(item)) for item in suggestions],
+        total=len(suggestions),
+    )
+
+
+@router.post("/entities/merge-review", response_model=EntityMergeReviewResponse)
+async def entity_merge_review(
+    payload: EntityMergeReviewRequest,
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+) -> EntityMergeReviewResponse:
+    """Apply or reject one admin-reviewed entity merge suggestion."""
+    svc = EntityMergeService(profile_id=payload.profile_id or profile_id, actor="admin_api")
+    try:
+        if payload.action == "merge":
+            result = await svc.merge(
+                session,
+                source_entity_id=payload.source_entity_id,
+                target_entity_id=payload.target_entity_id,
+                reason=payload.reason,
+            )
+        else:
+            result = await svc.reject(
+                session,
+                source_entity_id=payload.source_entity_id,
+                target_entity_id=payload.target_entity_id,
+                reason=payload.reason,
+            )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return EntityMergeReviewResponse.model_validate(asdict(result))
+
+
 @router.post("/entities/list", response_model=EntityListResponse)
 async def list_entities(
     payload: EntityListRequest,
@@ -150,6 +212,8 @@ async def list_entities(
     stmt = select(Entity).where(Entity.profile_id == profile_filter)
     if payload.status:
         stmt = stmt.where(Entity.status == payload.status)
+    else:
+        stmt = stmt.where(Entity.status != STATUS_MERGED)
     if payload.entity_type:
         stmt = stmt.where(Entity.type == payload.entity_type)
     if pattern:

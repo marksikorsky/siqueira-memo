@@ -25,6 +25,7 @@ from siqueira_memo.models import Entity, EntityAlias
 from siqueira_memo.models.constants import (
     STATUS_ACTIVE,
     STATUS_CANDIDATE,
+    STATUS_MERGED,
     STATUS_NEEDS_REVIEW,
 )
 from siqueira_memo.utils.canonical import normalize_text
@@ -70,6 +71,45 @@ class EntityLinkingService:
             )
         ).scalar_one_or_none()
         if alias is not None:
+            aliased_entity = (
+                await session.execute(
+                    select(Entity)
+                    .where(Entity.profile_id == self.profile_id)
+                    .where(Entity.id == alias.entity_id)
+                    .where(Entity.type == entity_type)
+                )
+            ).scalar_one_or_none()
+            if aliased_entity is not None and aliased_entity.status == STATUS_MERGED:
+                if aliased_entity.merged_into is None:
+                    return LinkResult(
+                        entity_id=aliased_entity.id,
+                        action="needs_review",
+                        confidence=self.review_threshold,
+                        normalized_name=normalized,
+                    )
+                target = (
+                    await session.execute(
+                        select(Entity)
+                        .where(Entity.profile_id == self.profile_id)
+                        .where(Entity.id == aliased_entity.merged_into)
+                        .where(Entity.type == entity_type)
+                        .where(Entity.status != STATUS_MERGED)
+                    )
+                ).scalar_one_or_none()
+                if target is None:
+                    return LinkResult(
+                        entity_id=aliased_entity.id,
+                        action="needs_review",
+                        confidence=self.review_threshold,
+                        normalized_name=normalized,
+                    )
+                alias.entity_id = target.id
+                return LinkResult(
+                    entity_id=target.id,
+                    action="link",
+                    confidence=1.0,
+                    normalized_name=normalized,
+                )
             return LinkResult(
                 entity_id=alias.entity_id,
                 action="link",
@@ -86,6 +126,37 @@ class EntityLinkingService:
             )
         ).scalar_one_or_none()
         if existing is not None:
+            if existing.status == STATUS_MERGED:
+                if existing.merged_into is None:
+                    return LinkResult(
+                        entity_id=existing.id,
+                        action="needs_review",
+                        confidence=self.review_threshold,
+                        normalized_name=normalized,
+                    )
+                target = (
+                    await session.execute(
+                        select(Entity)
+                        .where(Entity.profile_id == self.profile_id)
+                        .where(Entity.id == existing.merged_into)
+                        .where(Entity.type == entity_type)
+                        .where(Entity.status != STATUS_MERGED)
+                    )
+                ).scalar_one_or_none()
+                if target is None:
+                    return LinkResult(
+                        entity_id=existing.id,
+                        action="needs_review",
+                        confidence=self.review_threshold,
+                        normalized_name=normalized,
+                    )
+                self._record_alias(session, target.id, mention, normalized, entity_type, source_event_id)
+                return LinkResult(
+                    entity_id=target.id,
+                    action="link",
+                    confidence=1.0,
+                    normalized_name=normalized,
+                )
             # Same normalised name and type, no conflicting metadata → auto-merge alias.
             self._record_alias(session, existing.id, mention, normalized, entity_type, source_event_id)
             if existing.status != STATUS_ACTIVE:
