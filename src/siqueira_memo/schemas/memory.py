@@ -157,3 +157,57 @@ class MemoryRelationshipItem(MemoBase):
 
 class MemoryRelationshipListResponse(MemoBase):
     relationships: list[MemoryRelationshipItem]
+
+
+class EntityCardRequest(MemoBase):
+    profile_id: str | None = None
+    entity_id: uuid.UUID | None = None
+    name: str | None = None
+    entity_type: str | None = None
+    fact_limit: int = Field(default=8, ge=1, le=50)
+    decision_limit: int = Field(default=8, ge=1, le=50)
+    relationship_limit: int = Field(default=40, ge=1, le=200)
+
+
+class EntityCardMemoryItem(MemoBase):
+    id: uuid.UUID
+    kind: str
+    text: str
+    project: str | None = None
+    topic: str | None = None
+    status: str
+    confidence: float
+    source_event_ids: list[uuid.UUID] = Field(default_factory=list)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class EntityCardRelationshipItem(MemoBase):
+    id: uuid.UUID
+    source_type: str
+    source_id: uuid.UUID
+    relationship_type: str
+    target_type: str
+    target_id: uuid.UUID
+    confidence: float
+    rationale: str | None = None
+
+
+class EntityCardResponse(MemoBase):
+    entity_id: uuid.UUID
+    name: str
+    entity_type: str
+    aliases: list[str] = Field(default_factory=list)
+    status: str
+    description: str | None = None
+    projects: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+    latest_facts: list[EntityCardMemoryItem] = Field(default_factory=list)
+    active_decisions: list[EntityCardMemoryItem] = Field(default_factory=list)
+    related_secrets: list[EntityCardMemoryItem] = Field(default_factory=list)
+    relationships: list[EntityCardRelationshipItem] = Field(default_factory=list)
+    source_count: int
+    confidence: float
+    last_updated: datetime | None = None
+    conflict_count: int
+    warnings: list[str] = Field(default_factory=list)

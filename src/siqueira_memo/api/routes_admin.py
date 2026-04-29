@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -37,11 +38,14 @@ from siqueira_memo.schemas.conflicts import (
 )
 from siqueira_memo.schemas.ingest import GenericEventIn
 from siqueira_memo.schemas.memory import (
+    EntityCardRequest,
+    EntityCardResponse,
     MemoryRelationshipItem,
     MemoryRelationshipListRequest,
     MemoryRelationshipListResponse,
 )
 from siqueira_memo.services.conflict_service import ConflictService
+from siqueira_memo.services.entity_card_service import EntityCardService
 from siqueira_memo.services.ingest_service import IngestService
 from siqueira_memo.services.memory_version_service import MemoryVersionService
 from siqueira_memo.services.relationship_service import RelationshipService
@@ -93,6 +97,29 @@ def _apply_project_scope(stmt: Any, model: type[Any], payload: AdminSearchReques
     if payload.project:
         return stmt.where(model.project == payload.project)
     return stmt
+
+
+@router.post("/entities/card", response_model=EntityCardResponse)
+async def entity_card(
+    payload: EntityCardRequest,
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+) -> EntityCardResponse:
+    svc = EntityCardService(profile_id=payload.profile_id or profile_id)
+    try:
+        card = await svc.build_card(
+            session,
+            entity_id=payload.entity_id,
+            name=payload.name,
+            entity_type=payload.entity_type,
+            fact_limit=payload.fact_limit,
+            decision_limit=payload.decision_limit,
+            relationship_limit=payload.relationship_limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return EntityCardResponse.model_validate(asdict(card))
 
 
 @router.post("/relationships/list", response_model=MemoryRelationshipListResponse)
