@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from fastapi import APIRouter, Body, HTTPException, Response, status
-from sqlalchemy import func, literal, select
+from sqlalchemy import func, literal, or_, select
 
 from siqueira_memo.api.deps import AuthDep, ProfileDep, SessionDep
 from siqueira_memo.config import get_settings
@@ -19,6 +20,8 @@ from siqueira_memo.models import (
     ChunkEmbeddingOpenAITEL3,
     Decision,
     DecisionSource,
+    Entity,
+    EntityAlias,
     Fact,
     FactSource,
     MemoryConflict,
@@ -28,6 +31,7 @@ from siqueira_memo.models import (
     SessionSummary,
     TopicSummary,
 )
+from siqueira_memo.models.constants import RELATIONSHIP_BELONGS_TO_ENTITY, STATUS_ACTIVE
 from siqueira_memo.schemas.admin import AdminSearchHit, AdminSearchRequest, AdminSearchResponse
 from siqueira_memo.schemas.audit import AuditEntrySchema, AuditRequest, AuditResponse
 from siqueira_memo.schemas.conflicts import (
@@ -40,6 +44,9 @@ from siqueira_memo.schemas.ingest import GenericEventIn
 from siqueira_memo.schemas.memory import (
     EntityCardRequest,
     EntityCardResponse,
+    EntityListItem,
+    EntityListRequest,
+    EntityListResponse,
     MemoryRelationshipItem,
     MemoryRelationshipListRequest,
     MemoryRelationshipListResponse,
@@ -97,6 +104,215 @@ def _apply_project_scope(stmt: Any, model: type[Any], payload: AdminSearchReques
     if payload.project:
         return stmt.where(model.project == payload.project)
     return stmt
+
+
+def _dedupe_strings(values: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+@router.post("/entities/list", response_model=EntityListResponse)
+async def list_entities(
+    payload: EntityListRequest,
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+) -> EntityListResponse:
+    """List source-backed entity cards for the admin Entities tab."""
+    profile_filter = payload.profile_id or profile_id
+    alias_match_ids: list[uuid.UUID] = []
+    pattern = f"%{payload.query}%" if payload.query else None
+    if pattern:
+        alias_match_ids = list(
+            (
+                await session.execute(
+                    select(EntityAlias.entity_id)
+                    .where(EntityAlias.profile_id == profile_filter)
+                    .where(EntityAlias.status == STATUS_ACTIVE)
+                    .where(
+                        or_(
+                            EntityAlias.alias.ilike(pattern),
+                            EntityAlias.alias_normalized.ilike(pattern),
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    stmt = select(Entity).where(Entity.profile_id == profile_filter)
+    if payload.status:
+        stmt = stmt.where(Entity.status == payload.status)
+    if payload.entity_type:
+        stmt = stmt.where(Entity.type == payload.entity_type)
+    if pattern:
+        stmt = stmt.where(
+            or_(
+                Entity.name.ilike(pattern),
+                Entity.name_normalized.ilike(pattern),
+                Entity.id.in_(alias_match_ids) if alias_match_ids else literal(False),
+            )
+        )
+    stmt = stmt.order_by(Entity.updated_at.desc(), Entity.name.asc())
+    rows = list((await session.execute(stmt)).scalars().all())
+    entity_ids = [row.id for row in rows]
+
+    aliases_by_entity: dict[uuid.UUID, list[str]] = defaultdict(list)
+    relationships_by_entity: dict[uuid.UUID, list[MemoryRelationship]] = defaultdict(list)
+    fact_ids_by_entity: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
+    decision_ids_by_entity: dict[uuid.UUID, set[uuid.UUID]] = defaultdict(set)
+    projects_by_entity: dict[uuid.UUID, set[str]] = defaultdict(set)
+    topics_by_entity: dict[uuid.UUID, set[str]] = defaultdict(set)
+    updated_by_entity: dict[uuid.UUID, list[datetime]] = defaultdict(list)
+    confidence_by_entity: dict[uuid.UUID, list[float]] = defaultdict(list)
+
+    if entity_ids:
+        alias_rows = list(
+            (
+                await session.execute(
+                    select(EntityAlias)
+                    .where(EntityAlias.profile_id == profile_filter)
+                    .where(EntityAlias.status == STATUS_ACTIVE)
+                    .where(EntityAlias.entity_id.in_(entity_ids))
+                    .order_by(EntityAlias.created_at.asc(), EntityAlias.alias.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for alias in alias_rows:
+            aliases_by_entity[alias.entity_id].append(alias.alias)
+
+        relationships = list(
+            (
+                await session.execute(
+                    select(MemoryRelationship)
+                    .where(MemoryRelationship.profile_id == profile_filter)
+                    .where(MemoryRelationship.status == STATUS_ACTIVE)
+                    .where(
+                        or_(
+                            (MemoryRelationship.source_type == "entity")
+                            & MemoryRelationship.source_id.in_(entity_ids),
+                            (MemoryRelationship.target_type == "entity")
+                            & MemoryRelationship.target_id.in_(entity_ids),
+                        )
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for rel in relationships:
+            entity_id = rel.source_id if rel.source_type == "entity" else rel.target_id
+            relationships_by_entity[entity_id].append(rel)
+            if rel.relationship_type == RELATIONSHIP_BELONGS_TO_ENTITY:
+                confidence_by_entity[entity_id].append(float(rel.confidence or 0.0))
+            if rel.source_type == "fact":
+                fact_ids_by_entity[entity_id].add(rel.source_id)
+            if rel.target_type == "fact":
+                fact_ids_by_entity[entity_id].add(rel.target_id)
+            if rel.source_type == "decision":
+                decision_ids_by_entity[entity_id].add(rel.source_id)
+            if rel.target_type == "decision":
+                decision_ids_by_entity[entity_id].add(rel.target_id)
+
+        all_fact_ids = {fact_id for ids in fact_ids_by_entity.values() for fact_id in ids}
+        all_decision_ids = {
+            decision_id for ids in decision_ids_by_entity.values() for decision_id in ids
+        }
+        fact_by_id: dict[uuid.UUID, Fact] = {}
+        if all_fact_ids:
+            fact_by_id = {
+                row.id: row
+                for row in (
+                    await session.execute(
+                        select(Fact)
+                        .where(Fact.profile_id == profile_filter)
+                        .where(Fact.status == STATUS_ACTIVE)
+                        .where(Fact.id.in_(all_fact_ids))
+                    )
+                )
+                .scalars()
+                .all()
+            }
+        decision_by_id: dict[uuid.UUID, Decision] = {}
+        if all_decision_ids:
+            decision_by_id = {
+                row.id: row
+                for row in (
+                    await session.execute(
+                        select(Decision)
+                        .where(Decision.profile_id == profile_filter)
+                        .where(Decision.status == STATUS_ACTIVE)
+                        .where(Decision.id.in_(all_decision_ids))
+                    )
+                )
+                .scalars()
+                .all()
+            }
+        for entity_id, fact_ids in fact_ids_by_entity.items():
+            for fact_id in fact_ids:
+                fact = fact_by_id.get(fact_id)
+                if fact is None:
+                    continue
+                if fact.project:
+                    projects_by_entity[entity_id].add(fact.project)
+                if fact.topic:
+                    topics_by_entity[entity_id].add(fact.topic)
+                updated_by_entity[entity_id].append(fact.updated_at or fact.created_at)
+        for entity_id, decision_ids in decision_ids_by_entity.items():
+            for decision_id in decision_ids:
+                decision = decision_by_id.get(decision_id)
+                if decision is None:
+                    continue
+                if decision.project:
+                    projects_by_entity[entity_id].add(decision.project)
+                if decision.topic:
+                    topics_by_entity[entity_id].add(decision.topic)
+                updated_by_entity[entity_id].append(decision.updated_at or decision.decided_at)
+
+    items: list[EntityListItem] = []
+    for row in rows:
+        aliases = _dedupe_strings([row.name, *(row.aliases or []), *aliases_by_entity[row.id]])
+        projects = sorted(projects_by_entity[row.id])
+        topics = sorted(topics_by_entity[row.id])
+        if payload.project_scope == "global" and projects:
+            continue
+        if payload.project and payload.project not in projects:
+            continue
+        if payload.topic and payload.topic not in topics:
+            continue
+        updated_values = [row.updated_at, *updated_by_entity[row.id]]
+        confidence_values = confidence_by_entity[row.id]
+        items.append(
+            EntityListItem(
+                entity_id=row.id,
+                name=row.name,
+                entity_type=row.type,
+                aliases=aliases,
+                status=row.status,
+                description=row.description,
+                projects=projects,
+                topics=topics,
+                source_count=len(fact_ids_by_entity[row.id] | decision_ids_by_entity[row.id]),
+                relationship_count=len(relationships_by_entity[row.id]),
+                confidence=(
+                    sum(confidence_values) / len(confidence_values) if confidence_values else 0.0
+                ),
+                last_updated=max((value for value in updated_values if value is not None), default=None),
+            )
+        )
+
+    total = len(items)
+    paged = items[payload.offset : payload.offset + payload.limit]
+    return EntityListResponse(entities=paged, total=total)
 
 
 @router.post("/entities/card", response_model=EntityCardResponse)

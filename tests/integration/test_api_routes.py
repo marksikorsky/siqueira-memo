@@ -197,6 +197,11 @@ async def test_admin_ui_uses_form_login_instead_of_basic_auth_popup(api_client):
     assert "/v1/memory/timeline" in html
     assert "/v1/memory/sources" in html
     assert "/v1/admin/relationships/list" in html
+    assert "/v1/admin/entities/list" in html
+    assert "/v1/admin/entities/card" in html
+    assert "Entities" in html
+    assert "loadEntities" in html
+    assert "openEntityCard" in html
     assert "Relationship Graph" in html
     assert "relationship-badge" in html
     assert "--bg: #fbfaf8" in html

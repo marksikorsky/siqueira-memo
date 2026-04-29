@@ -169,6 +169,38 @@ class EntityCardRequest(MemoBase):
     relationship_limit: int = Field(default=40, ge=1, le=200)
 
 
+class EntityListRequest(MemoBase):
+    profile_id: str | None = None
+    query: str | None = None
+    entity_type: str | None = None
+    project_scope: Literal["all", "project", "global"] = "all"
+    project: str | None = None
+    topic: str | None = None
+    status: str | None = None
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+class EntityListItem(MemoBase):
+    entity_id: uuid.UUID
+    name: str
+    entity_type: str
+    aliases: list[str] = Field(default_factory=list)
+    status: str
+    description: str | None = None
+    projects: list[str] = Field(default_factory=list)
+    topics: list[str] = Field(default_factory=list)
+    source_count: int
+    relationship_count: int
+    confidence: float
+    last_updated: datetime | None = None
+
+
+class EntityListResponse(MemoBase):
+    entities: list[EntityListItem]
+    total: int
+
+
 class EntityCardMemoryItem(MemoBase):
     id: uuid.UUID
     kind: str
