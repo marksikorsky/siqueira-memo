@@ -6,9 +6,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from siqueira_memo.config import settings_for_tests
-from siqueira_memo.models import Chunk, Decision, Fact, MemoryEvent
+from siqueira_memo.models import Chunk, ChunkEmbeddingMock, Decision, Fact, MemoryEvent
 from siqueira_memo.models.constants import (
     CHUNK_SOURCE_MESSAGE,
     RECALL_MODE_DEEP,
@@ -129,8 +130,6 @@ async def test_recall_writes_retrieval_log(session):
     profile = "p1"
     svc = RetrievalService(profile_id=profile)
     await svc.recall(session, RecallRequest(query="nothing here", mode="fast"))
-    from sqlalchemy import select
-
     from siqueira_memo.models import RetrievalLog
 
     rows = (await session.execute(select(RetrievalLog))).scalars().all()
@@ -169,6 +168,163 @@ async def test_recall_ranks_chunks_by_lexical_overlap(session):
     ids = [str(c.id) for c in result.context_pack.chunks]
     assert ids
     assert ids[0] == str(chunk.id)
+
+
+@pytest.mark.asyncio
+async def test_recall_chunks_include_fusion_lane_explanation_and_log_metadata(session):
+    profile = "p1"
+    matching = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="The capybara codename belongs to the Siqueira retrieval fusion slice.",
+        token_count=11,
+        tokenizer_name="test",
+    )
+    unrelated = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="Coffee preferences: black, no sugar.",
+        token_count=6,
+        tokenizer_name="test",
+    )
+    session.add_all([matching, unrelated])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="capybara codename", types=["chunks"], mode="balanced"),
+    )
+
+    assert result.context_pack.chunks
+    top = result.context_pack.chunks[0]
+    assert top.id == matching.id
+    assert top.retrieval_lane == "lexical"
+    assert "lexical" in (top.retrieval_explanation or "")
+    assert top.score_breakdown["lexical_score"] > 0
+    assert top.score_breakdown["final_score"] == top.score
+
+    from siqueira_memo.models import RetrievalLog
+
+    log = (await session.execute(select(RetrievalLog))).scalars().first()
+    assert log is not None
+    assert log.extra_metadata["retrieval_fusion"]["lane_counts"]["lexical"] >= 1
+    assert log.extra_metadata["retrieval_fusion"]["chunk_score_fields"] == [
+        "lexical_score",
+        "vector_score",
+        "recency_score",
+        "final_score",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recall_does_not_return_recency_only_chunk_noise(session):
+    profile = "p1"
+    session.add(
+        Chunk(
+            profile_id=profile,
+            source_type=CHUNK_SOURCE_MESSAGE,
+            source_id=uuid.uuid4(),
+            chunk_text="Coffee preferences: black, no sugar.",
+            token_count=6,
+            tokenizer_name="test",
+            created_at=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="wallet tax residency", types=["chunks"], mode="balanced"),
+    )
+
+    assert result.context_pack.chunks == []
+    assert "no matching memory found" in result.context_pack.warnings
+
+
+@pytest.mark.asyncio
+async def test_recall_uses_persisted_embedding_table_for_semantic_chunk_lane(session):
+    profile = "p1"
+    provider = MockEmbeddingProvider()
+    semantic_only = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="Operational memory stores source-backed facts for agent work.",
+        token_count=8,
+        tokenizer_name="test",
+        created_at=datetime.now(UTC) - timedelta(days=30),
+    )
+    lexical_noise = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="banana orange grape",
+        token_count=3,
+        tokenizer_name="test",
+        created_at=datetime.now(UTC),
+    )
+    session.add_all([semantic_only, lexical_noise])
+    await session.flush()
+    session.add(
+        ChunkEmbeddingMock(
+            chunk_id=semantic_only.id,
+            model_name=provider.spec.model_name,
+            model_version=provider.spec.model_version,
+            dimensions=provider.spec.dimensions,
+            embedding=provider.embed("wallet tax residency"),
+        )
+    )
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile, embedding_provider=provider).recall(
+        session,
+        RecallRequest(query="wallet tax residency", types=["chunks"], mode="balanced"),
+    )
+
+    assert result.context_pack.chunks
+    top = result.context_pack.chunks[0]
+    assert top.id == semantic_only.id
+    assert top.retrieval_lane == "semantic"
+    assert top.score_breakdown["vector_score"] > 0
+
+
+@pytest.mark.asyncio
+async def test_recall_lexical_lane_finds_relevant_chunk_beyond_recent_window(session):
+    profile = "p1"
+    recent_noise = [
+        Chunk(
+            profile_id=profile,
+            source_type=CHUNK_SOURCE_MESSAGE,
+            source_id=uuid.uuid4(),
+            chunk_text=f"recent unrelated coffee note {index}",
+            token_count=5,
+            tokenizer_name="test",
+            created_at=datetime.now(UTC) - timedelta(minutes=index),
+        )
+        for index in range(170)
+    ]
+    old_relevant = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text="The armadillo retrieval fusion incident contains the exact rare marker.",
+        token_count=10,
+        tokenizer_name="test",
+        created_at=datetime.now(UTC) - timedelta(days=365),
+    )
+    session.add_all([*recent_noise, old_relevant])
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="armadillo exact rare marker", types=["chunks"], mode="balanced"),
+    )
+
+    assert result.context_pack.chunks
+    assert result.context_pack.chunks[0].id == old_relevant.id
+    assert result.context_pack.chunks[0].retrieval_lane == "lexical"
 
 
 @pytest.mark.asyncio

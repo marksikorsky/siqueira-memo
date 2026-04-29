@@ -18,12 +18,12 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from siqueira_memo.logging import get_logger
@@ -57,9 +57,16 @@ from siqueira_memo.schemas.recall import (
 from siqueira_memo.services.embedding_service import (
     EmbeddingProvider,
     MockEmbeddingProvider,
-    cosine,
 )
 from siqueira_memo.services.relationship_service import RelationshipService
+from siqueira_memo.services.retrieval_fusion import (
+    ChunkScoringInput,
+    ScoredChunk,
+    filter_non_matching_chunks,
+    score_chunks,
+    summarize_chunk_fusion,
+    tokenize_query,
+)
 from siqueira_memo.services.secret_policy import (
     is_secret_metadata,
     masked_preview,
@@ -79,18 +86,6 @@ _EMBEDDING_TABLE_BY_NAME = {
 
 
 @dataclass
-class _Candidate:
-    chunk: Chunk
-    lexical: float = 0.0
-    vector: float = 0.0
-    recency: float = 0.0
-
-    @property
-    def score(self) -> float:
-        return self.lexical * 0.5 + self.vector * 0.4 + self.recency * 0.1
-
-
-@dataclass
 class RetrievalResult:
     context_pack: ContextPack
     candidates_count: int = 0
@@ -100,19 +95,7 @@ class RetrievalResult:
 
 
 def _tokenize(query: str) -> list[str]:
-    text = normalize_text(query)
-    # Keep words of length >= 2 to cut single-letter noise.
-    return [t for t in re.findall(r"[\w\-]+", text, flags=re.UNICODE) if len(t) >= 2]
-
-
-def _recency_weight(created_at: datetime | None) -> float:
-    if created_at is None:
-        return 0.0
-    age_days = max(
-        0.0, (datetime.now(created_at.tzinfo) - created_at).total_seconds() / 86_400.0
-    )
-    # Smooth decay: ~1 at age 0, ~0.5 at 14 days, ~0.1 at 90 days.
-    return 1.0 / (1.0 + age_days / 14.0)
+    return tokenize_query(query)
 
 
 def _limits_for_mode(mode: str, requested: int) -> dict[str, int]:
@@ -183,16 +166,33 @@ class RetrievalService:
                     self._fact_to_schema(fact, allow_secret_recall=request.allow_secret_recall)
                 )
 
-        # ---------- chunks (lexical + vector) ----------
+        fusion_metadata: dict[str, object] = {
+            "lane_counts": {},
+            "chunk_score_fields": [
+                "lexical_score",
+                "vector_score",
+                "recency_score",
+                "final_score",
+            ],
+        }
+
+        # ---------- chunks (explicit lexical/vector/recency fusion) ----------
         if "chunks" in want_types or not want_types:
             candidates = await self._query_chunks(
                 session, request, tokens, limits["chunks"] * 3
             )
             candidates_count += len(candidates)
-            scored = self._score_candidates(candidates, request.query)
-            scored.sort(key=lambda c: c.score, reverse=True)
-            kept = scored[: limits["chunks"]]
+            chunk_inputs = await self._chunk_scoring_inputs(session, candidates)
+            scored = score_chunks(
+                chunk_inputs,
+                query=request.query,
+                embedding_provider=self.embedding_provider,
+            )
+            matched = filter_non_matching_chunks(scored, query=request.query)
+            matched.sort(key=lambda c: c.score.final_score, reverse=True)
+            kept = matched[: limits["chunks"]]
             rejected_count += max(0, len(scored) - len(kept))
+            fusion_metadata = summarize_chunk_fusion(kept)
             for candidate in kept:
                 chunks_out.append(self._chunk_to_schema(candidate))
 
@@ -266,6 +266,7 @@ class RetrievalService:
                         "topic": request.topic,
                         "entities": list(request.entities),
                     },
+                    "retrieval_fusion": fusion_metadata,
                 },
             )
         )
@@ -368,35 +369,88 @@ class RetrievalService:
             stmt = stmt.where(Chunk.project == request.project)
         if request.topic is not None:
             stmt = stmt.where(Chunk.topic == request.topic)
-        rows = list((await session.execute(stmt.limit(limit * 4))).scalars().all())
         if not request.allow_secret_recall:
-            rows = [row for row in rows if row.sensitivity not in {"sensitive", "secret"}]
+            stmt = stmt.where(Chunk.sensitivity.notin_({"sensitive", "secret"}))
+
+        if tokens:
+            lexical_stmt = stmt.where(
+                or_(*(Chunk.chunk_text.ilike(f"%{token}%") for token in tokens))
+            ).order_by(Chunk.created_at.desc(), Chunk.id.asc())
+            rows = list((await session.execute(lexical_stmt.limit(limit * 8))).scalars().all())
+            rows.extend(await self._query_embedding_chunk_rows(session, request, limit=limit * 4))
+            return _dedupe_chunks(rows)
+
+        rows = list(
+            (await session.execute(stmt.order_by(Chunk.created_at.desc(), Chunk.id.asc()).limit(limit * 4)))
+            .scalars()
+            .all()
+        )
         return rows
 
-    def _score_candidates(self, candidates: Iterable[Chunk], query: str) -> list[_Candidate]:
-        tokens = set(_tokenize(query))
-        embedded_query = self.embedding_provider.embed(query) if tokens else None
-        scored: list[_Candidate] = []
-        for chunk in candidates:
-            lexical = 0.0
-            if tokens:
-                chunk_tokens = set(_tokenize(chunk.chunk_text))
-                if chunk_tokens:
-                    overlap = tokens & chunk_tokens
-                    lexical = len(overlap) / max(1, len(tokens))
-            vec_score = 0.0
-            emb = chunk.extra_metadata.get("embedding") if chunk.extra_metadata else None
-            if embedded_query is not None and isinstance(emb, list):
-                vec_score = max(0.0, cosine(embedded_query, emb))
-            scored.append(
-                _Candidate(
-                    chunk=chunk,
-                    lexical=lexical,
-                    vector=vec_score,
-                    recency=_recency_weight(chunk.created_at),
-                )
+    async def _query_embedding_chunk_rows(
+        self, session: AsyncSession, request: RecallRequest, *, limit: int
+    ) -> list[Chunk]:
+        embedding_model: Any = _EMBEDDING_TABLE_BY_NAME.get(self.embedding_table_name)
+        if embedding_model is None:
+            return []
+        stmt = (
+            select(Chunk)
+            .join(embedding_model, embedding_model.chunk_id == Chunk.id)
+            .where(Chunk.profile_id == self.profile_id)
+            .where(embedding_model.embedding.is_not(None))
+            .order_by(Chunk.created_at.desc(), Chunk.id.asc())
+            .limit(limit)
+        )
+        if request.project is not None:
+            stmt = stmt.where(Chunk.project == request.project)
+        if request.topic is not None:
+            stmt = stmt.where(Chunk.topic == request.topic)
+        if not request.allow_secret_recall:
+            stmt = stmt.where(Chunk.sensitivity.notin_({"sensitive", "secret"}))
+        return list((await session.execute(stmt)).scalars().all())
+
+    async def _chunk_scoring_inputs(
+        self, session: AsyncSession, chunks: Sequence[Chunk]
+    ) -> list[ChunkScoringInput]:
+        embedding_by_chunk_id = await self._load_chunk_embeddings(session, [chunk.id for chunk in chunks])
+        return [
+            ChunkScoringInput(
+                id=chunk.id,
+                source_type=chunk.source_type,
+                source_id=chunk.source_id,
+                chunk_text=chunk.chunk_text,
+                token_count=chunk.token_count,
+                tokenizer_name=chunk.tokenizer_name,
+                project=chunk.project,
+                topic=chunk.topic,
+                sensitivity=chunk.sensitivity,
+                created_at=chunk.created_at,
+                extra_metadata=dict(chunk.extra_metadata or {}),
+                embedding=embedding_by_chunk_id.get(chunk.id),
             )
-        return scored
+            for chunk in chunks
+        ]
+
+    async def _load_chunk_embeddings(
+        self, session: AsyncSession, chunk_ids: Sequence[uuid.UUID]
+    ) -> dict[uuid.UUID, list[float]]:
+        if not chunk_ids:
+            return {}
+        embedding_model: Any = _EMBEDDING_TABLE_BY_NAME.get(self.embedding_table_name)
+        if embedding_model is None:
+            return {}
+        rows = (
+            await session.execute(
+                select(embedding_model.chunk_id, embedding_model.embedding)
+                .where(embedding_model.chunk_id.in_(chunk_ids))
+                .where(embedding_model.embedding.is_not(None))
+            )
+        ).all()
+        out: dict[uuid.UUID, list[float]] = {}
+        for chunk_id, embedding in rows:
+            if embedding is not None:
+                out[chunk_id] = [float(v) for v in embedding]
+        return out
 
     # ------------------------------------------------------------------
     # Summaries
@@ -645,24 +699,38 @@ class RetrievalService:
 
         )
 
-    def _chunk_to_schema(self, candidate: _Candidate) -> RecallChunk:
+    def _chunk_to_schema(self, candidate: ScoredChunk) -> RecallChunk:
         chunk = candidate.chunk
         return RecallChunk(
             id=chunk.id,
             source_type=chunk.source_type,
             source_id=chunk.source_id,
             chunk_text=chunk.chunk_text,
-            score=round(candidate.score, 4),
+            score=round(candidate.score.final_score, 4),
             project=chunk.project,
             topic=chunk.topic,
             sensitivity=chunk.sensitivity,
             created_at=chunk.created_at,
+            retrieval_lane=candidate.score.source_lane,
+            retrieval_explanation=candidate.score.explanation,
+            score_breakdown=candidate.score.as_breakdown(),
         )
 
 
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+def _dedupe_chunks(chunks: Sequence[Chunk]) -> list[Chunk]:
+    seen: set[uuid.UUID] = set()
+    out: list[Chunk] = []
+    for chunk in chunks:
+        if chunk.id in seen:
+            continue
+        seen.add(chunk.id)
+        out.append(chunk)
+    return out
+
+
 def _dedupe_seed_nodes(seeds: Sequence[tuple[str, uuid.UUID]]) -> list[tuple[str, uuid.UUID]]:
     seen: set[tuple[str, uuid.UUID]] = set()
     out: list[tuple[str, uuid.UUID]] = []

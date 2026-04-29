@@ -105,6 +105,9 @@ class RecallChunk(MemoBase):
     topic: str | None = None
     sensitivity: str = "normal"
     created_at: datetime | None = None
+    retrieval_lane: str = "lexical"
+    retrieval_explanation: str | None = None
+    score_breakdown: dict[str, float] = Field(default_factory=dict)
 
 
 class RecallSummary(MemoBase):
