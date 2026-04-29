@@ -24,6 +24,7 @@ from siqueira_memo.schemas.recall import (
     RecallFact,
     RecallSummary,
 )
+from siqueira_memo.services.context_tree_service import ContextTreeService
 from siqueira_memo.services.redaction_service import redact
 
 
@@ -51,7 +52,9 @@ class ContextPackShaper:
                 embedding_table=pack.embedding_table,
                 token_estimate=0,
             )
-        return self._trim_to_budget(pack, budget)
+        return ContextTreeService(self.settings).preview_context_pack(
+            pack, mode=mode, exclude_secrets=True
+        ).pack
 
     def _budget_for_mode(self, mode: str) -> int | None:
         assert self.settings is not None
