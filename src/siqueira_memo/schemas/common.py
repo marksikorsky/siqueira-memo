@@ -20,6 +20,8 @@ class SourceRef(MemoBase):
     tool_event_id: str | None = None
     snippet: str | None = None
     created_at: datetime | None = None
+    retrieval_lane: str | None = None
+    retrieval_explanation: str | None = None
 
 
 class SensitivityField(MemoBase):

@@ -461,6 +461,127 @@ async def test_recall_latest_fact_uses_created_at_when_valid_from_missing(sessio
 
 
 @pytest.mark.asyncio
+async def test_recall_source_lane_uses_safe_event_metadata_without_secret_payload_values(session):
+    profile = "p1"
+    raw_secret = "notdetectedcredentialvalue"
+    event = MemoryEvent(
+        event_type="fact_extracted",
+        source="remember_api",
+        actor="assistant",
+        profile_id=profile,
+        session_id="source-lane-session",
+        payload={
+            "event_type": "fact_extracted",
+            "fact_id": str(uuid.uuid4()),
+            "canonical_key": "a" * 64,
+            "status": "active",
+            "api_key": raw_secret,
+        },
+    )
+    session.add(event)
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="fact extracted active", types=["summaries"], mode="balanced"),
+    )
+
+    assert result.context_pack.source_snippets
+    snippet = result.context_pack.source_snippets[0]
+    assert snippet.event_id == str(event.id)
+    assert snippet.retrieval_lane == "source"
+    assert "fact_extracted" in (snippet.snippet or "")
+    assert "a" * 64 in (snippet.snippet or "")
+    assert "api_key" not in (snippet.snippet or "")
+    assert raw_secret not in (snippet.snippet or "")
+
+
+@pytest.mark.asyncio
+async def test_recall_source_lane_ignores_matches_only_in_unsafe_event_payload(session):
+    profile = "p1"
+    raw_secret = "notdetectedcredentialvalue"
+    event = MemoryEvent(
+        event_type="tool_result_received",
+        source="tool",
+        actor="assistant",
+        profile_id=profile,
+        payload={
+            "summary": "Railway webhook deployment target captured",
+            "api_key": raw_secret,
+            "raw_output": "Railway webhook deployment target secret dump",
+        },
+    )
+    session.add(event)
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="Railway webhook deployment target", types=["summaries"], mode="balanced"),
+    )
+
+    assert result.context_pack.source_snippets == []
+
+
+@pytest.mark.asyncio
+async def test_recall_source_lane_rejects_untrusted_safe_key_shapes(session):
+    profile = "p1"
+    raw_secret = "notdetectedcredentialvalue"
+    event = MemoryEvent(
+        event_type="tool_result_received",
+        source="tool",
+        actor="assistant",
+        profile_id=profile,
+        payload={
+            "event_type": "tool_result_received",
+            "canonical_key": raw_secret,
+            "status": "active",
+        },
+    )
+    session.add(event)
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query=raw_secret, types=["summaries"], mode="balanced"),
+    )
+
+    assert result.context_pack.source_snippets == []
+
+
+@pytest.mark.asyncio
+async def test_recall_include_sources_false_suppresses_all_source_snippets(session):
+    profile = "p1"
+    source_id = uuid.uuid4()
+    chunk = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=source_id,
+        chunk_text="Siqueira Memo uses pgvector for hybrid retrieval.",
+        token_count=10,
+        tokenizer_name="test",
+    )
+    session.add(chunk)
+    await session.flush()
+    provider = MockEmbeddingProvider()
+    session.add(ChunkEmbeddingMock(
+        chunk_id=chunk.id,
+        model_name=provider.spec.model_name,
+        model_version=provider.spec.model_version,
+        dimensions=provider.spec.dimensions,
+        embedding=provider.embed(chunk.chunk_text),
+    ))
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(query="pgvector hybrid retrieval", include_sources=False, mode="balanced"),
+    )
+
+    assert result.context_pack.chunks
+    assert result.context_pack.source_snippets == []
+
+
+@pytest.mark.asyncio
 async def test_recall_writes_retrieval_log(session):
     profile = "p1"
     svc = RetrievalService(profile_id=profile)

@@ -34,6 +34,7 @@ from siqueira_memo.models import (
     ChunkEmbeddingOpenAITEL3,
     Decision,
     Fact,
+    MemoryEvent,
     RetrievalLog,
     SessionSummary,
     TopicSummary,
@@ -58,6 +59,7 @@ from siqueira_memo.services.embedding_service import (
     EmbeddingProvider,
     MockEmbeddingProvider,
 )
+from siqueira_memo.services.redaction_service import redact
 from siqueira_memo.services.relationship_service import RelationshipService
 from siqueira_memo.services.retrieval_fusion import (
     ChunkScoringInput,
@@ -245,13 +247,21 @@ class RetrievalService:
 
         token_estimate = _estimate_tokens(answer_context, chunks_out, decisions_out, facts_out)
 
+        source_snippets: list[SourceRef] = []
+        if request.include_sources:
+            source_snippets = _top_sources(chunks_out, limits)
+            event_snippets = await self._query_source_events(
+                session, request, tokens, limit=max(3, min(10, request.limit))
+            )
+            source_snippets = _merge_source_snippets(event_snippets, source_snippets, limit=max(3, min(10, request.limit)))
+
         pack = ContextPack(
             answer_context=answer_context,
             decisions=decisions_out,
             facts=facts_out,
             chunks=chunks_out,
             summaries=summaries_out,
-            source_snippets=_top_sources(chunks_out, limits),
+            source_snippets=source_snippets,
             conflicts=conflicts,
             confidence=confidence,
             warnings=warnings,
@@ -693,6 +703,46 @@ class RetrievalService:
                 seeds.append(("decision", decision.id))
         return seeds
 
+    async def _query_source_events(
+        self, session: AsyncSession, request: RecallRequest, tokens: Sequence[str], *, limit: int
+    ) -> list[SourceRef]:
+        source_tokens = temporal_content_tokens(request.query) or list(tokens)
+        if not source_tokens or request.project is not None or request.topic is not None or request.entities:
+            return []
+        stmt = select(MemoryEvent).where(MemoryEvent.profile_id == self.profile_id)
+        if request.session_id is not None:
+            stmt = stmt.where(MemoryEvent.session_id == request.session_id)
+        if request.since is not None:
+            stmt = stmt.where(MemoryEvent.created_at >= request.since)
+        if request.until is not None:
+            stmt = stmt.where(MemoryEvent.created_at <= request.until)
+        candidate_window = (
+            1000
+            if request.mode == RECALL_MODE_FORENSIC
+            else 500
+            if request.mode == RECALL_MODE_DEEP
+            else 200
+        )
+        stmt = stmt.order_by(MemoryEvent.created_at.desc(), MemoryEvent.id.asc()).limit(candidate_window)
+        rows = list((await session.execute(stmt)).scalars().all())
+        scored = sorted(
+            rows,
+            key=lambda event: (
+                lexical_overlap_score(source_tokens, _event_search_text(event)),
+                event.created_at,
+            ),
+            reverse=True,
+        )
+        out: list[SourceRef] = []
+        for event in scored:
+            score = lexical_overlap_score(source_tokens, _event_search_text(event))
+            if score <= 0:
+                continue
+            out.append(_event_to_source_ref(event, source_tokens))
+            if len(out) >= limit:
+                break
+        return out
+
     async def _has_secret_candidates(self, session: AsyncSession, request: RecallRequest) -> bool:
         fact_stmt = select(Fact).where(Fact.profile_id == self.profile_id)
         decision_stmt = select(Decision).where(Decision.profile_id == self.profile_id)
@@ -882,6 +932,151 @@ class RetrievalService:
 # ----------------------------------------------------------------------
 # Helpers
 # ----------------------------------------------------------------------
+_SAFE_LABEL_RE = re.compile(r"^[a-zA-Z0-9_.:-]{1,128}$")
+_HEX_64_RE = re.compile(r"^[a-fA-F0-9]{64}$")
+_SOURCE_TIMELINE_EVENT_TYPES = frozenset(
+    {
+        "decision_recorded",
+        "decision_superseded",
+        "fact_extracted",
+        "fact_invalidated",
+        "memory_deleted",
+        "memory_rolled_back",
+        "summary_created",
+        "user_correction_received",
+    }
+)
+_SAFE_EVENT_PAYLOAD_KEYS = frozenset(
+    {
+        "canonical_key",
+        "confidence",
+        "decision_id",
+        "event_type",
+        "fact_id",
+        "kind",
+        "operation",
+        "relationship_type",
+        "replacement_id",
+        "scope",
+        "source_id",
+        "source_type",
+        "status",
+        "summary_id",
+        "target_id",
+        "target_type",
+        "version_id",
+    }
+)
+
+
+def _event_search_text(event: MemoryEvent) -> str:
+    if event.event_type not in _SOURCE_TIMELINE_EVENT_TYPES:
+        return ""
+    payload_text = " ".join(str(value) for value in _safe_event_payload(event).values())
+    return " ".join(filter(None, [event.event_type, payload_text]))
+
+
+def _event_to_source_ref(event: MemoryEvent, tokens: Sequence[str]) -> SourceRef:
+    fields: dict[str, str] = {"event_type": event.event_type}
+    fields.update({key: str(value) for key, value in _safe_event_payload(event).items()})
+    text = "; ".join(f"{key}={redact(value).redacted}" for key, value in fields.items() if value)
+    return SourceRef(
+        event_id=str(event.id),
+        snippet=_query_centered_excerpt(text, tokens),
+        created_at=event.created_at,
+        retrieval_lane="source",
+        retrieval_explanation="matched safe source-event metadata/timeline by query terms",
+    )
+
+
+def _safe_event_payload(event: MemoryEvent) -> dict[str, str]:
+    if event.event_type not in _SOURCE_TIMELINE_EVENT_TYPES:
+        return {}
+    safe: dict[str, str] = {}
+    for key, value in (event.payload or {}).items():
+        if key not in _SAFE_EVENT_PAYLOAD_KEYS:
+            continue
+        if key == "event_type" and str(value) != event.event_type:
+            continue
+        safe_value = _safe_event_payload_value(key, value)
+        if safe_value:
+            safe[key] = safe_value
+    return safe
+
+
+def _safe_event_payload_value(key: str, value: object) -> str | None:
+    if value is None:
+        return None
+    if key in {"confidence"}:
+        return str(value) if isinstance(value, (int, float)) else None
+    if key in {
+        "decision_id",
+        "fact_id",
+        "replacement_id",
+        "summary_id",
+        "target_id",
+        "version_id",
+    }:
+        return str(value) if _is_uuid_string(value) else None
+    if key in {"canonical_key", "source_id"}:
+        text = str(value)
+        return text if _HEX_64_RE.fullmatch(text) or _is_uuid_string(text) else None
+    if key in {
+        "event_type",
+        "kind",
+        "operation",
+        "relationship_type",
+        "scope",
+        "source_type",
+        "status",
+        "target_type",
+    }:
+        text = str(value)
+        return text if _SAFE_LABEL_RE.fullmatch(text) else None
+    return None
+
+
+def _is_uuid_string(value: object) -> bool:
+    try:
+        uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
+def _query_centered_excerpt(text: str, tokens: Sequence[str], *, max_len: int = 360) -> str:
+    if len(text) <= max_len:
+        return text
+    lowered = text.lower()
+    positions = [lowered.find(token.lower()) for token in tokens if lowered.find(token.lower()) >= 0]
+    if not positions:
+        return text[:max_len]
+    center = min(positions)
+    start = max(0, center - max_len // 3)
+    end = min(len(text), start + max_len)
+    if end - start < max_len:
+        start = max(0, end - max_len)
+    prefix = "…" if start > 0 else ""
+    suffix = "…" if end < len(text) else ""
+    return f"{prefix}{text[start:end]}{suffix}"
+
+
+def _merge_source_snippets(
+    first: Sequence[SourceRef], second: Sequence[SourceRef], *, limit: int
+) -> list[SourceRef]:
+    seen: set[str] = set()
+    out: list[SourceRef] = []
+    for source in [*first, *second]:
+        key = source.event_id
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(source)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _structured_lane_counts(
     decisions: Sequence[RecallDecision], facts: Sequence[RecallFact]
 ) -> dict[str, int]:
