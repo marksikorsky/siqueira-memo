@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -13,6 +15,7 @@ from siqueira_memo.db import create_all_for_tests, dispose_engines, drop_all_for
 from siqueira_memo.hermes_provider.provider import SiqueiraMemoProvider
 from siqueira_memo.hermes_provider.tools import TOOL_NAMES, tool_schemas
 from siqueira_memo.models import Chunk, Decision, Fact, MemoryEvent, Message, SessionSummary
+from siqueira_memo.models.constants import STATUS_ACTIVE
 from siqueira_memo.workers.jobs import register_default_handlers, set_worker_settings
 from siqueira_memo.workers.queue import MemoryJobQueue, set_default_queue
 
@@ -65,6 +68,13 @@ def test_remember_tool_schema_exposes_required_arguments():
     assert "statement" in remember["parameters"]["properties"]
 
 
+def test_recall_tool_schema_defaults_to_trusted_internal_secret_recall():
+    recall = next(t for t in tool_schemas() if t["name"] == "siqueira_memory_recall")
+    allow_secret = recall["parameters"]["properties"]["allow_secret_recall"]
+    assert allow_secret["default"] is True
+    assert "trusted" in allow_secret["description"].lower()
+
+
 @pytest.mark.asyncio
 async def test_handle_tool_call_returns_json_string(provider):
     prov, _settings, _queue = provider
@@ -73,6 +83,53 @@ async def test_handle_tool_call_returns_json_string(provider):
     assert data["ok"] is True
     assert data["tool"] == "siqueira_memory_recall"
     assert data["result"]["mode"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_handle_tool_call_defaults_to_trusted_internal_raw_secret_recall(provider):
+    prov, settings, _queue = provider
+    raw_secret = "sk-proj-" + "h" * 40
+    from siqueira_memo.db import get_session_factory
+
+    factory = get_session_factory(settings)
+    async with factory() as session:
+        event = MemoryEvent(
+            event_type="fact_extracted",
+            source="test",
+            actor="assistant",
+            profile_id=prov._profile_id,
+            payload={"event_type": "fact_extracted", "fact_id": str(uuid.uuid4())},
+        )
+        session.add(event)
+        await session.flush()
+        session.add(
+            Fact(
+                profile_id=prov._profile_id,
+                subject="OpenAI provider key",
+                predicate="stored_as_secret",
+                object=raw_secret,
+                statement=f"OpenAI provider key is {raw_secret}.",
+                canonical_key="fact-secret-openai-provider",
+                status=STATUS_ACTIVE,
+                confidence=0.99,
+                source_event_ids=[event.id],
+                topic="secrets",
+                extractor_name="manual",
+                created_at=datetime.now(UTC),
+                extra_metadata={
+                    "sensitivity": "secret",
+                    "masked_preview": "OpenAI provider key is sk-proj-...hhhh.",
+                    "secret_value": raw_secret,
+                },
+            )
+        )
+        await session.commit()
+
+    raw = prov.handle_tool_call("siqueira_memory_recall", {"query": "OpenAI provider key", "mode": "balanced"})
+    data = json.loads(raw)
+    assert data["ok"] is True
+    payload = json.dumps(data["result"])
+    assert raw_secret in payload
 
 
 @pytest.mark.asyncio

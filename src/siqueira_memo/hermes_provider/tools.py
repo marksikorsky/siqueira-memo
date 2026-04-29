@@ -48,8 +48,8 @@ def tool_schemas() -> list[dict[str, Any]]:
                 "include_sources": {"type": "boolean", "default": True},
                 "allow_secret_recall": {
                     "type": "boolean",
-                    "default": False,
-                    "description": "Explicitly include masked secret records in recall. Raw secret values still require audited admin reveal.",
+                    "default": True,
+                    "description": "Trusted Hermes/internal recall includes raw secret memory when relevant. Set false for external/public-safe presentation.",
                 },
             },
             required=["query"],

@@ -549,6 +549,45 @@ async def test_recall_source_lane_rejects_untrusted_safe_key_shapes(session):
 
 
 @pytest.mark.asyncio
+async def test_trusted_forensic_source_lane_can_match_and_show_raw_payload(session):
+    profile = "p1"
+    raw_secret = "sk-proj-" + "t" * 40
+    event = MemoryEvent(
+        event_type="tool_result_received",
+        source="tool",
+        actor="assistant",
+        profile_id=profile,
+        session_id="trusted-source-session",
+        payload={
+            "summary": "Railway webhook deployment target captured",
+            "api_key": raw_secret,
+            "raw_output": "Railway webhook deployment target details",
+        },
+    )
+    session.add(event)
+    await session.flush()
+
+    result = await RetrievalService(profile_id=profile, trusted_internal=True).recall(
+        session,
+        RecallRequest(
+            query="Railway webhook deployment target",
+            types=["summaries"],
+            mode="forensic",
+            allow_secret_recall=True,
+        ),
+    )
+
+    assert result.context_pack.source_snippets
+    snippet = result.context_pack.source_snippets[0]
+    assert snippet.event_id == str(event.id)
+    assert snippet.retrieval_lane == "source_trusted"
+    assert raw_secret in (snippet.snippet or "")
+    assert "source=tool" in (snippet.snippet or "")
+    assert "actor=assistant" in (snippet.snippet or "")
+    assert "session_id=trusted-source-session" in (snippet.snippet or "")
+
+
+@pytest.mark.asyncio
 async def test_recall_include_sources_false_suppresses_all_source_snippets(session):
     profile = "p1"
     source_id = uuid.uuid4()
@@ -579,6 +618,47 @@ async def test_recall_include_sources_false_suppresses_all_source_snippets(sessi
 
     assert result.context_pack.chunks
     assert result.context_pack.source_snippets == []
+
+
+@pytest.mark.asyncio
+async def test_untrusted_allow_secret_recall_does_not_return_raw_secret_chunks(session):
+    profile = "p1"
+    raw_secret = "sk-proj-" + "u" * 40
+    secret_chunk = Chunk(
+        profile_id=profile,
+        source_type=CHUNK_SOURCE_MESSAGE,
+        source_id=uuid.uuid4(),
+        chunk_text=f"OpenAI chunk key is {raw_secret}.",
+        token_count=6,
+        tokenizer_name="test",
+        sensitivity="secret",
+    )
+    session.add(secret_chunk)
+    await session.flush()
+
+    untrusted = await RetrievalService(profile_id=profile).recall(
+        session,
+        RecallRequest(
+            query="OpenAI chunk key",
+            types=["chunks"],
+            mode="balanced",
+            allow_secret_recall=True,
+        ),
+    )
+    assert untrusted.context_pack.chunks == []
+    assert raw_secret not in untrusted.context_pack.answer_context
+
+    trusted = await RetrievalService(profile_id=profile, trusted_internal=True).recall(
+        session,
+        RecallRequest(
+            query="OpenAI chunk key",
+            types=["chunks"],
+            mode="balanced",
+            allow_secret_recall=True,
+        ),
+    )
+    assert trusted.context_pack.chunks
+    assert raw_secret in trusted.context_pack.chunks[0].chunk_text
 
 
 @pytest.mark.asyncio
@@ -990,8 +1070,25 @@ async def test_recall_excludes_secret_fact_until_explicitly_allowed(session):
     recalled_secret = next(f for f in explicit.context_pack.facts if f.id == secret_fact.id)
     assert recalled_secret.sensitivity == "secret"
     assert recalled_secret.masked_preview == "OpenAI staging key is sk-proj-...bbbb."
+    assert recalled_secret.secret_masked is True
+    assert raw_secret not in recalled_secret.object
     assert raw_secret not in recalled_secret.statement
     assert raw_secret not in explicit.context_pack.answer_context
+
+    trusted = await RetrievalService(profile_id=profile, trusted_internal=True).recall(
+        session,
+        RecallRequest(
+            query="OpenAI staging key",
+            types=["facts"],
+            mode="balanced",
+            allow_secret_recall=True,
+        ),
+    )
+    trusted_secret = next(f for f in trusted.context_pack.facts if f.id == secret_fact.id)
+    assert trusted_secret.secret_masked is False
+    assert raw_secret in trusted_secret.object
+    assert raw_secret in trusted_secret.statement
+    assert raw_secret in trusted.context_pack.answer_context
 
 
 def test_context_pack_shaper_excludes_secret_items_from_prefetch():

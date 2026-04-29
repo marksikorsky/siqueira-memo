@@ -10,7 +10,8 @@ Behavioural contract:
 * ``prefetch()`` returns a ``ContextPack`` shaped to Hermes prefetch budgets
   (plan §33.5) and must never emit deep/forensic payloads.
 * ``handle_tool_call()`` dispatches the ``siqueira_*`` tools and always returns
-  a JSON string — never raises into Hermes.
+  a JSON string — never raises into Hermes. Explicit recall tool calls are
+  trusted internal reads by default; prefetch shaping is not applied there.
 * Write-side hooks (``on_pre_compress``, ``on_session_end``, ``on_memory_write``,
   ``on_delegation``) persist observations but never mutate live memory without
   going through the extraction lifecycle.
@@ -48,7 +49,6 @@ from siqueira_memo.schemas.memory import (
     TimelineRequest,
 )
 from siqueira_memo.schemas.recall import RecallRequest
-from siqueira_memo.services.context_pack_service import ContextPackShaper
 from siqueira_memo.services.deletion_service import DeletionService
 from siqueira_memo.services.embedding_service import build_embedding_provider
 from siqueira_memo.services.extraction_service import ExtractionService
@@ -232,21 +232,17 @@ class SiqueiraMemoProvider:
                         mode=args.get("mode", "balanced"),
                         limit=int(args.get("limit", 15)),
                         include_sources=bool(args.get("include_sources", True)),
-                        allow_secret_recall=bool(args.get("allow_secret_recall", False)),
+                        allow_secret_recall=bool(args.get("allow_secret_recall", True)),
                         session_id=self._session_id or None,
                     )
                     embedding = build_embedding_provider(self._settings)
                     retrieval_svc = RetrievalService(
-                        profile_id=self._profile_id, embedding_provider=embedding
+                        profile_id=self._profile_id,
+                        embedding_provider=embedding,
+                        trusted_internal=True,
                     )
                     retrieval_result = await retrieval_svc.recall(session, recall_payload)
-                    pack = (
-                        ContextPackShaper(self._settings).shape_for_prefetch(
-                            retrieval_result.context_pack, recall_payload.mode
-                        )
-                        if recall_payload.mode in {"fast", "balanced"}
-                        else retrieval_result.context_pack
-                    )
+                    pack = retrieval_result.context_pack
                     body = pack.model_dump(mode="json")
 
                 elif tool_name == "siqueira_memory_remember":

@@ -70,6 +70,49 @@ async def test_readyz_reports_sqlite(api_client):
 
 
 @pytest.mark.asyncio
+async def test_recall_api_allow_secret_recall_still_returns_masked_secret_records(api_client):
+    client, settings = api_client
+    auth = _auth(settings)
+    raw_secret = "sk-proj-" + "r" * 40
+    remember = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "fact",
+            "subject": "OpenAI recall API key",
+            "predicate": "stored_as_secret",
+            "object": raw_secret,
+            "statement": f"OpenAI recall API key is {raw_secret}.",
+            "topic": "secrets",
+            "metadata": {
+                "sensitivity": "secret",
+                "masked_preview": "OpenAI recall API key is sk-proj-...rrrr.",
+                "secret_value": raw_secret,
+            },
+        },
+    )
+    assert remember.status_code == 200, remember.text
+
+    recall = await client.post(
+        "/v1/recall",
+        headers=auth,
+        json={
+            "query": "OpenAI recall API key",
+            "types": ["facts"],
+            "mode": "balanced",
+            "allow_secret_recall": True,
+        },
+    )
+    assert recall.status_code == 200, recall.text
+    body_text = recall.text
+    body = recall.json()
+    assert raw_secret not in body_text
+    assert "sk-proj-...rrrr" in body_text
+    assert body["context_pack"]["facts"]
+    assert body["context_pack"]["facts"][0]["secret_masked"] is True
+
+
+@pytest.mark.asyncio
 async def test_ingest_requires_auth(api_client):
     client, _settings = api_client
     resp = await client.post(

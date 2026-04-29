@@ -15,6 +15,7 @@ Design principles:
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import uuid
@@ -124,12 +125,14 @@ class RetrievalService:
         profile_id: str,
         embedding_provider: EmbeddingProvider | None = None,
         embedding_table_name: str | None = None,
+        trusted_internal: bool = False,
     ) -> None:
         self.profile_id = profile_id
         self.embedding_provider = embedding_provider or MockEmbeddingProvider()
         self.embedding_table_name = (
             embedding_table_name or self.embedding_provider.spec.table_name
         )
+        self.trusted_internal = trusted_internal
 
     # ------------------------------------------------------------------
     # Top-level
@@ -164,7 +167,7 @@ class RetrievalService:
                 decisions_out.append(
                     self._decision_to_schema(
                         decision,
-                        allow_secret_recall=request.allow_secret_recall,
+                        allow_secret_recall=self._raw_secret_recall(request),
                         retrieval_lane=lane,
                         retrieval_explanation=explanation,
                         score_breakdown=score_breakdown,
@@ -182,7 +185,7 @@ class RetrievalService:
                 facts_out.append(
                     self._fact_to_schema(
                         fact,
-                        allow_secret_recall=request.allow_secret_recall,
+                        allow_secret_recall=self._raw_secret_recall(request),
                         retrieval_lane=lane,
                         retrieval_explanation=explanation,
                         score_breakdown=score_breakdown,
@@ -458,7 +461,7 @@ class RetrievalService:
             stmt = stmt.where(Chunk.project == request.project)
         if request.topic is not None:
             stmt = stmt.where(Chunk.topic == request.topic)
-        if not request.allow_secret_recall:
+        if not self._raw_secret_recall(request):
             stmt = stmt.where(Chunk.sensitivity.notin_({"sensitive", "secret"}))
 
         if tokens:
@@ -495,7 +498,7 @@ class RetrievalService:
             stmt = stmt.where(Chunk.project == request.project)
         if request.topic is not None:
             stmt = stmt.where(Chunk.topic == request.topic)
-        if not request.allow_secret_recall:
+        if not self._raw_secret_recall(request):
             stmt = stmt.where(Chunk.sensitivity.notin_({"sensitive", "secret"}))
         if not any(normalize_text(entity).strip() for entity in request.entities):
             return []
@@ -527,7 +530,7 @@ class RetrievalService:
             stmt = stmt.where(Chunk.project == request.project)
         if request.topic is not None:
             stmt = stmt.where(Chunk.topic == request.topic)
-        if not request.allow_secret_recall:
+        if not self._raw_secret_recall(request):
             stmt = stmt.where(Chunk.sensitivity.notin_({"sensitive", "secret"}))
         return list((await session.execute(stmt)).scalars().all())
 
@@ -678,7 +681,7 @@ class RetrievalService:
                     continue
                 decision_schema = self._decision_to_schema(
                     decision_row,
-                    allow_secret_recall=request.allow_secret_recall,
+                    allow_secret_recall=self._raw_secret_recall(request),
                     retrieval_lane="graph",
                     retrieval_explanation=rel.explanation,
                 )
@@ -705,7 +708,7 @@ class RetrievalService:
                     continue
                 fact_schema = self._fact_to_schema(
                     fact_row,
-                    allow_secret_recall=request.allow_secret_recall,
+                    allow_secret_recall=self._raw_secret_recall(request),
                     retrieval_lane="graph",
                     retrieval_explanation=rel.explanation,
                 )
@@ -739,12 +742,16 @@ class RetrievalService:
                 seeds.append(("decision", decision.id))
         return seeds
 
+    def _raw_secret_recall(self, request: RecallRequest) -> bool:
+        return self.trusted_internal and request.allow_secret_recall
+
     async def _query_source_events(
         self, session: AsyncSession, request: RecallRequest, tokens: Sequence[str], *, limit: int
     ) -> list[SourceRef]:
         source_tokens = temporal_content_tokens(request.query) or list(tokens)
         if not source_tokens or request.project is not None or request.topic is not None or request.entities:
             return []
+        trusted = self.trusted_internal and _trusted_source_recall(request)
         stmt = select(MemoryEvent).where(MemoryEvent.profile_id == self.profile_id)
         if request.session_id is not None:
             stmt = stmt.where(MemoryEvent.session_id == request.session_id)
@@ -764,17 +771,17 @@ class RetrievalService:
         scored = sorted(
             rows,
             key=lambda event: (
-                lexical_overlap_score(source_tokens, _event_search_text(event)),
+                lexical_overlap_score(source_tokens, _event_search_text(event, trusted=trusted)),
                 event.created_at,
             ),
             reverse=True,
         )
         out: list[SourceRef] = []
         for event in scored:
-            score = lexical_overlap_score(source_tokens, _event_search_text(event))
+            score = lexical_overlap_score(source_tokens, _event_search_text(event, trusted=trusted))
             if score <= 0:
                 continue
-            out.append(_event_to_source_ref(event, source_tokens))
+            out.append(_event_to_source_ref(event, source_tokens, trusted=trusted))
             if len(out) >= limit:
                 break
         return out
@@ -883,8 +890,9 @@ class RetrievalService:
     ) -> RecallDecision:
         metadata = decision.extra_metadata or {}
         secret = is_secret_metadata(metadata)
-        decision_text = masked_preview(decision.decision, metadata) if secret else decision.decision
-        rationale = masked_preview(decision.rationale, metadata) if secret else decision.rationale
+        should_mask = secret and not allow_secret_recall
+        decision_text = masked_preview(decision.decision, metadata) if should_mask else decision.decision
+        rationale = masked_preview(decision.rationale, metadata) if should_mask else decision.rationale
         return RecallDecision(
             id=decision.id,
             project=decision.project,
@@ -900,7 +908,7 @@ class RetrievalService:
             sensitivity="secret" if secret else str(metadata.get("sensitivity") or "internal"),
             masked_preview=masked_preview(decision.decision, metadata) if secret else None,
             secret_ref=secret_ref(metadata),
-            secret_masked=secret,
+            secret_masked=should_mask,
             retrieval_lane=retrieval_lane,
             retrieval_explanation=retrieval_explanation,
             score_breakdown=score_breakdown or {},
@@ -921,13 +929,14 @@ class RetrievalService:
     ) -> RecallFact:
         metadata = fact.extra_metadata or {}
         secret = is_secret_metadata(metadata)
+        should_mask = secret and not allow_secret_recall
         preview = masked_preview(fact.statement, metadata) if secret else None
         return RecallFact(
             id=fact.id,
-            subject=masked_preview(fact.subject, metadata) if secret else fact.subject,
+            subject=masked_preview(fact.subject, metadata) if should_mask else fact.subject,
             predicate=fact.predicate,
-            object=masked_preview(fact.object, metadata) if secret else fact.object,
-            statement=preview if secret else fact.statement,
+            object=masked_preview(fact.object, metadata) if should_mask else fact.object,
+            statement=preview if should_mask else fact.statement,
             status=fact.status,
             confidence=float(fact.confidence or 0.0),
             project=fact.project,
@@ -937,7 +946,7 @@ class RetrievalService:
             sensitivity="secret" if secret else str(metadata.get("sensitivity") or "internal"),
             masked_preview=preview,
             secret_ref=secret_ref(metadata),
-            secret_masked=secret,
+            secret_masked=should_mask,
             retrieval_lane=retrieval_lane,
             retrieval_explanation=retrieval_explanation,
             score_breakdown=score_breakdown or {},
@@ -1005,7 +1014,13 @@ _SAFE_EVENT_PAYLOAD_KEYS = frozenset(
 )
 
 
-def _event_search_text(event: MemoryEvent) -> str:
+def _trusted_source_recall(request: RecallRequest) -> bool:
+    return request.allow_secret_recall and request.mode == RECALL_MODE_FORENSIC
+
+
+def _event_search_text(event: MemoryEvent, *, trusted: bool = False) -> str:
+    if trusted:
+        return _trusted_event_text(event)
     if event.event_type not in _SOURCE_TIMELINE_EVENT_TYPES:
         return ""
     payload_text = " ".join(str(value) for value in _safe_event_payload(event).values())
@@ -1016,7 +1031,16 @@ def _chunk_matches_requested_entities(chunk: Chunk, requested_entities: Sequence
     return bool(entity_match_terms(list(chunk.entities or []), requested_entities))
 
 
-def _event_to_source_ref(event: MemoryEvent, tokens: Sequence[str]) -> SourceRef:
+def _event_to_source_ref(event: MemoryEvent, tokens: Sequence[str], *, trusted: bool = False) -> SourceRef:
+    if trusted:
+        text = _trusted_event_text(event)
+        return SourceRef(
+            event_id=str(event.id),
+            snippet=_query_centered_excerpt(text, tokens, max_len=900),
+            created_at=event.created_at,
+            retrieval_lane="source_trusted",
+            retrieval_explanation="trusted forensic recall matched raw source-event metadata/payload",
+        )
     fields: dict[str, str] = {"event_type": event.event_type}
     fields.update({key: str(value) for key, value in _safe_event_payload(event).items()})
     text = "; ".join(f"{key}={redact(value).redacted}" for key, value in fields.items() if value)
@@ -1026,6 +1050,19 @@ def _event_to_source_ref(event: MemoryEvent, tokens: Sequence[str]) -> SourceRef
         created_at=event.created_at,
         retrieval_lane="source",
         retrieval_explanation="matched safe source-event metadata/timeline by query terms",
+    )
+
+
+def _trusted_event_text(event: MemoryEvent) -> str:
+    fields = {
+        "event_type": event.event_type,
+        "source": event.source,
+        "actor": event.actor,
+        "session_id": event.session_id or "",
+        "payload": json.dumps(event.payload or {}, ensure_ascii=False, sort_keys=True, default=str),
+    }
+    return "; ".join(
+        f"{key}={_compact_whitespace(str(value))}" for key, value in fields.items() if value
     )
 
 
@@ -1082,6 +1119,10 @@ def _is_uuid_string(value: object) -> bool:
     except (TypeError, ValueError):
         return False
     return True
+
+
+def _compact_whitespace(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _query_centered_excerpt(text: str, tokens: Sequence[str], *, max_len: int = 360) -> str:
