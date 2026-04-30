@@ -72,6 +72,9 @@ class RecallDecision(MemoBase):
     retrieval_lane: str = "structured"
     retrieval_explanation: str | None = None
     score_breakdown: dict[str, float] = Field(default_factory=dict)
+    trust_score: float = 0.0
+    trust_label: str = "low"
+    trust_explanation: str | None = None
     sources: list[SourceRef] = Field(default_factory=list)
 
 
@@ -94,6 +97,9 @@ class RecallFact(MemoBase):
     retrieval_lane: str = "structured"
     retrieval_explanation: str | None = None
     score_breakdown: dict[str, float] = Field(default_factory=dict)
+    trust_score: float = 0.0
+    trust_label: str = "low"
+    trust_explanation: str | None = None
     sources: list[SourceRef] = Field(default_factory=list)
 
 

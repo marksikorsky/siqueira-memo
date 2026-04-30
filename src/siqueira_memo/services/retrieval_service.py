@@ -81,6 +81,7 @@ from siqueira_memo.services.secret_policy import (
     recall_policy,
     secret_ref,
 )
+from siqueira_memo.services.trust_service import TrustService
 from siqueira_memo.utils.canonical import normalize_text
 
 log = get_logger(__name__)
@@ -372,14 +373,13 @@ class RetrievalService:
                     reverse=True,
                 )
             else:
-                # Rank by token overlap with decision/topic/rationale.
-                def match(d: Decision) -> float:
-                    text = " ".join(
-                        filter(None, [d.decision, d.topic, d.rationale, d.context, d.project or ""])
-                    )
-                    return lexical_overlap_score(tokens, text)
-
-                rows.sort(key=lambda d: (d.status == STATUS_ACTIVE, match(d)), reverse=True)
+                rows.sort(
+                    key=lambda d: (
+                        d.status == STATUS_ACTIVE,
+                        self._decision_score_breakdown(d, request=request, tokens=tokens)["final_score"],
+                    ),
+                    reverse=True,
+                )
         else:
             rows.sort(key=lambda d: (d.status == STATUS_ACTIVE, d.decided_at), reverse=True)
         return rows[:limit]
@@ -429,17 +429,11 @@ class RetrievalService:
                     reverse=True,
                 )
             else:
-                def score(fact: Fact) -> float:
-                    text = " ".join(
-                        filter(
-                            None,
-                            [fact.statement, fact.subject, fact.predicate, fact.object, fact.topic or ""],
-                        )
-                    )
-                    return lexical_overlap_score(tokens, text)
-
                 rows.sort(
-                    key=lambda f: (f.status == STATUS_ACTIVE, score(f), f.confidence),
+                    key=lambda f: (
+                        f.status == STATUS_ACTIVE,
+                        self._fact_score_breakdown(f, request=request, tokens=tokens)["final_score"],
+                    ),
                     reverse=True,
                 )
         else:
@@ -815,14 +809,16 @@ class RetrievalService:
         recency_score = recency_weight(decision.decided_at)
         confidence_score = float((decision.extra_metadata or {}).get("confidence") or 0.0)
         confidence_score = max(0.0, min(1.0, confidence_score))
+        trust_score = TrustService.estimate_memory("decision", decision).trust_score
         if has_temporal_intent(request.query):
-            final_score = lexical_score * 0.70 + recency_score * 0.20 + confidence_score * 0.10
+            final_score = lexical_score * 0.62 + recency_score * 0.18 + confidence_score * 0.08 + trust_score * 0.12
         else:
-            final_score = lexical_score * 0.70 + confidence_score * 0.20 + recency_score * 0.10
+            final_score = lexical_score * 0.58 + confidence_score * 0.14 + recency_score * 0.08 + trust_score * 0.20
         return {
             "lexical_score": round(lexical_score, 4),
             "recency_score": round(recency_score, 4),
             "confidence_score": round(confidence_score, 4),
+            "trust_score": round(trust_score, 4),
             "final_score": round(final_score, 4),
         }
 
@@ -837,14 +833,16 @@ class RetrievalService:
         temporal_anchor = fact.valid_from or fact.valid_to or fact.created_at or fact.updated_at
         recency_score = recency_weight(temporal_anchor)
         confidence_score = max(0.0, min(1.0, float(fact.confidence or 0.0)))
+        trust_score = TrustService.estimate_memory("fact", fact).trust_score
         if has_temporal_intent(request.query):
-            final_score = lexical_score * 0.70 + recency_score * 0.20 + confidence_score * 0.10
+            final_score = lexical_score * 0.62 + recency_score * 0.18 + confidence_score * 0.08 + trust_score * 0.12
         else:
-            final_score = lexical_score * 0.60 + confidence_score * 0.30 + recency_score * 0.10
+            final_score = lexical_score * 0.50 + confidence_score * 0.16 + recency_score * 0.08 + trust_score * 0.26
         return {
             "lexical_score": round(lexical_score, 4),
             "recency_score": round(recency_score, 4),
             "confidence_score": round(confidence_score, 4),
+            "trust_score": round(trust_score, 4),
             "final_score": round(final_score, 4),
         }
 
@@ -889,6 +887,7 @@ class RetrievalService:
         score_breakdown: dict[str, float] | None = None,
     ) -> RecallDecision:
         metadata = decision.extra_metadata or {}
+        trust = TrustService.estimate_memory("decision", decision)
         secret = is_secret_metadata(metadata)
         should_mask = secret and not allow_secret_recall
         decision_text = masked_preview(decision.decision, metadata) if should_mask else decision.decision
@@ -912,6 +911,9 @@ class RetrievalService:
             retrieval_lane=retrieval_lane,
             retrieval_explanation=retrieval_explanation,
             score_breakdown=score_breakdown or {},
+            trust_score=trust.trust_score,
+            trust_label=trust.trust_label,
+            trust_explanation=trust.explanation,
             sources=[
                 SourceRef(event_id=str(eid))
                 for eid in (decision.source_event_ids or [])
@@ -928,6 +930,7 @@ class RetrievalService:
         score_breakdown: dict[str, float] | None = None,
     ) -> RecallFact:
         metadata = fact.extra_metadata or {}
+        trust = TrustService.estimate_memory("fact", fact)
         secret = is_secret_metadata(metadata)
         should_mask = secret and not allow_secret_recall
         preview = masked_preview(fact.statement, metadata) if secret else None
@@ -950,6 +953,9 @@ class RetrievalService:
             retrieval_lane=retrieval_lane,
             retrieval_explanation=retrieval_explanation,
             score_breakdown=score_breakdown or {},
+            trust_score=trust.trust_score,
+            trust_label=trust.trust_label,
+            trust_explanation=trust.explanation,
             sources=[
                 SourceRef(event_id=str(eid)) for eid in (fact.source_event_ids or [])
             ],

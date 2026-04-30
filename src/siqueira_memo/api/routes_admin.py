@@ -36,7 +36,13 @@ from siqueira_memo.models.constants import (
     STATUS_ACTIVE,
     STATUS_MERGED,
 )
-from siqueira_memo.schemas.admin import AdminSearchHit, AdminSearchRequest, AdminSearchResponse
+from siqueira_memo.schemas.admin import (
+    AdminSearchHit,
+    AdminSearchRequest,
+    AdminSearchResponse,
+    TrustFeedbackRequest,
+    TrustFeedbackResponse,
+)
 from siqueira_memo.schemas.audit import AuditEntrySchema, AuditRequest, AuditResponse
 from siqueira_memo.schemas.conflicts import (
     ConflictItem,
@@ -74,6 +80,7 @@ from siqueira_memo.services.secret_policy import (
     secret_ref,
     secret_value_for_reveal,
 )
+from siqueira_memo.services.trust_service import TrustService
 
 router = APIRouter(prefix="/v1/admin")
 
@@ -812,6 +819,7 @@ async def capture_stats(
 
 def _fact_to_detail(row: Fact) -> dict[str, Any]:
     secret = is_secret_metadata(row.extra_metadata)
+    trust = TrustService.estimate_memory("fact", row)
     preview = masked_preview(row.statement, row.extra_metadata) if secret else row.statement
     return {
         "id": row.id,
@@ -828,6 +836,10 @@ def _fact_to_detail(row: Fact) -> dict[str, Any]:
         "topic": row.topic,
         "status": row.status,
         "confidence": row.confidence,
+        "trust_score": trust.trust_score,
+        "trust_label": trust.trust_label,
+        "trust_explanation": trust.explanation,
+        "trust_factors": trust.factors,
         "valid_from": row.valid_from,
         "valid_to": row.valid_to,
         "source_event_ids": row.source_event_ids,
@@ -841,6 +853,7 @@ def _fact_to_detail(row: Fact) -> dict[str, Any]:
 
 def _decision_to_detail(row: Decision) -> dict[str, Any]:
     secret = is_secret_metadata(row.extra_metadata)
+    trust = TrustService.estimate_memory("decision", row)
     preview = masked_preview(row.decision, row.extra_metadata) if secret else row.decision
     return {
         "id": row.id,
@@ -858,6 +871,10 @@ def _decision_to_detail(row: Decision) -> dict[str, Any]:
         "options_considered": row.options_considered,
         "project": row.project,
         "status": row.status,
+        "trust_score": trust.trust_score,
+        "trust_label": trust.trust_label,
+        "trust_explanation": trust.explanation,
+        "trust_factors": trust.factors,
         "reversible": row.reversible,
         "source_event_ids": row.source_event_ids,
         "source_message_ids": row.source_message_ids,
@@ -1354,6 +1371,35 @@ async def conflicts_resolve(
         status=row.status,
         resolution=row.resolution,
         resolved_at=row.resolved_at,
+    )
+
+
+@router.post("/trust/feedback", response_model=TrustFeedbackResponse)
+async def trust_feedback(
+    payload: TrustFeedbackRequest,
+    session: SessionDep,
+    profile_id: ProfileDep,
+    _token: AuthDep,
+) -> TrustFeedbackResponse:
+    svc = TrustService(profile_id=payload.profile_id or profile_id, actor="admin_api")
+    try:
+        target = await svc.record_feedback(
+            session,
+            target_type=payload.target_type,
+            target_id=payload.target_id,
+            feedback=payload.feedback,
+            reason=payload.reason,
+        )
+        assessment = await svc.score_memory(session, payload.target_type, target)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return TrustFeedbackResponse(
+        target_type=payload.target_type,
+        target_id=payload.target_id,
+        trust_score=assessment.trust_score,
+        trust_label=assessment.trust_label,
+        trust_explanation=assessment.explanation,
+        factors=assessment.factors,
     )
 
 

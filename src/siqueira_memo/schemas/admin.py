@@ -40,6 +40,23 @@ class AdminSearchResponse(MemoBase):
     total: int = 0
 
 
+class TrustFeedbackRequest(MemoBase):
+    profile_id: str | None = None
+    target_type: Literal["fact", "decision"]
+    target_id: uuid.UUID
+    feedback: Literal["useful", "wrong", "stale", "duplicate"]
+    reason: str | None = None
+
+
+class TrustFeedbackResponse(MemoBase):
+    target_type: str
+    target_id: uuid.UUID
+    trust_score: float
+    trust_label: str
+    trust_explanation: str
+    factors: dict[str, float] = Field(default_factory=dict)
+
+
 class HealthStatus(MemoBase):
     ok: bool
     env: str
