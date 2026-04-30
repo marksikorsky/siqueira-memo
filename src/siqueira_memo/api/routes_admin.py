@@ -80,7 +80,7 @@ from siqueira_memo.services.secret_policy import (
     secret_ref,
     secret_value_for_reveal,
 )
-from siqueira_memo.services.trust_service import TrustService
+from siqueira_memo.services.trust_service import TrustAssessment, TrustService
 
 router = APIRouter(prefix="/v1/admin")
 
@@ -109,6 +109,32 @@ def _relationship_item(row: MemoryRelationship) -> MemoryRelationshipItem:
         status=row.status,
         created_at=row.created_at,
     )
+
+
+def _trust_filter_matches(row: Fact | Decision, assessment: TrustAssessment, trust_filter: str) -> bool:
+    if trust_filter in {"", "any"}:
+        return True
+    if trust_filter == "low_trust":
+        return assessment.trust_label in {"low", "very_low"}
+    if trust_filter == "conflicting":
+        return assessment.factors.get("open_conflict_penalty", 0.0) < 0.0
+    if trust_filter == "unverified":
+        return not bool(row.source_event_ids) or row.status == "unverified"
+    if trust_filter == "stale":
+        feedback = [
+            str(item.get("feedback"))
+            for item in (row.extra_metadata or {}).get("trust_feedback", [])
+            if isinstance(item, dict)
+        ]
+        return row.status in {"superseded", "invalidated"} or "stale" in feedback
+    return assessment.trust_label == trust_filter
+
+
+def _hit_with_trust(base: AdminSearchHit, assessment: TrustAssessment) -> AdminSearchHit:
+    base.trust_score = assessment.trust_score
+    base.trust_label = assessment.trust_label
+    base.trust_explanation = assessment.explanation
+    return base
 
 
 def _apply_project_scope(stmt: Any, model: type[Any], payload: AdminSearchRequest) -> Any:
@@ -483,24 +509,47 @@ async def search(
         f_stmt = _apply_project_scope(f_stmt, Fact, payload)
         if payload.status:
             f_stmt = f_stmt.where(Fact.status == payload.status)
-        total = (
-            await session.execute(select(func.count()).select_from(f_stmt.subquery()))
-        ).scalar_one()
-        f_stmt = (
-            f_stmt.order_by(Fact.created_at.desc())
-            .offset(payload.offset)
-            .limit(payload.limit)
-        )
-        for f in (await session.execute(f_stmt)).scalars():
+        trust_service = TrustService(profile_id=profile_filter)
+        if payload.trust_filter == "any":
+            total = (
+                await session.execute(select(func.count()).select_from(f_stmt.subquery()))
+            ).scalar_one()
+            page_rows = list(
+                (
+                    await session.execute(
+                        f_stmt.order_by(Fact.created_at.desc())
+                        .offset(payload.offset)
+                        .limit(payload.limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assessments = await trust_service.score_memories(session, "fact", list(page_rows))
+            trusted_rows = [(f, assessments[f.id]) for f in page_rows if f.id in assessments]
+        else:
+            rows = list((await session.execute(f_stmt.order_by(Fact.created_at.desc()))).scalars().all())
+            assessments = await trust_service.score_memories(session, "fact", list(rows))
+            filtered_rows = [
+                (f, assessments[f.id])
+                for f in rows
+                if f.id in assessments and _trust_filter_matches(f, assessments[f.id], payload.trust_filter)
+            ]
+            total = len(filtered_rows)
+            trusted_rows = filtered_rows[payload.offset : payload.offset + payload.limit]
+        for f, assessment in trusted_rows:
             hits.append(
-                AdminSearchHit(
-                    id=f.id,
-                    target_type="fact",
-                    preview=_admin_preview(f.statement, f.extra_metadata),
-                    project=f.project,
-                    topic=f.topic,
-                    status=f.status,
-                    created_at=f.created_at,
+                _hit_with_trust(
+                    AdminSearchHit(
+                        id=f.id,
+                        target_type="fact",
+                        preview=_admin_preview(f.statement, f.extra_metadata),
+                        project=f.project,
+                        topic=f.topic,
+                        status=f.status,
+                        created_at=f.created_at,
+                    ),
+                    assessment,
                 )
             )
         return AdminSearchResponse(hits=hits, total=total)
@@ -515,24 +564,47 @@ async def search(
             d_stmt = d_stmt.where(Decision.topic == payload.topic)
         if payload.status:
             d_stmt = d_stmt.where(Decision.status == payload.status)
-        total = (
-            await session.execute(select(func.count()).select_from(d_stmt.subquery()))
-        ).scalar_one()
-        d_stmt = (
-            d_stmt.order_by(Decision.decided_at.desc())
-            .offset(payload.offset)
-            .limit(payload.limit)
-        )
-        for d in (await session.execute(d_stmt)).scalars():
+        trust_service = TrustService(profile_id=profile_filter)
+        if payload.trust_filter == "any":
+            total = (
+                await session.execute(select(func.count()).select_from(d_stmt.subquery()))
+            ).scalar_one()
+            page_rows = list(
+                (
+                    await session.execute(
+                        d_stmt.order_by(Decision.decided_at.desc())
+                        .offset(payload.offset)
+                        .limit(payload.limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assessments = await trust_service.score_memories(session, "decision", list(page_rows))
+            trusted_decision_rows = [(d, assessments[d.id]) for d in page_rows if d.id in assessments]
+        else:
+            decision_rows = list((await session.execute(d_stmt.order_by(Decision.decided_at.desc()))).scalars().all())
+            assessments = await trust_service.score_memories(session, "decision", list(decision_rows))
+            filtered_rows = [
+                (d, assessments[d.id])
+                for d in decision_rows
+                if d.id in assessments and _trust_filter_matches(d, assessments[d.id], payload.trust_filter)
+            ]
+            total = len(filtered_rows)
+            trusted_decision_rows = filtered_rows[payload.offset : payload.offset + payload.limit]
+        for d, assessment in trusted_decision_rows:
             hits.append(
-                AdminSearchHit(
-                    id=d.id,
-                    target_type="decision",
-                    preview=_admin_preview(d.decision, d.extra_metadata),
-                    project=d.project,
-                    topic=d.topic,
-                    status=d.status,
-                    created_at=d.decided_at,
+                _hit_with_trust(
+                    AdminSearchHit(
+                        id=d.id,
+                        target_type="decision",
+                        preview=_admin_preview(d.decision, d.extra_metadata),
+                        project=d.project,
+                        topic=d.topic,
+                        status=d.status,
+                        created_at=d.decided_at,
+                    ),
+                    assessment,
                 )
             )
         return AdminSearchResponse(hits=hits, total=total)

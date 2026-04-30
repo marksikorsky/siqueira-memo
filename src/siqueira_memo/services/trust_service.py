@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from siqueira_memo.models import Decision, Fact, MemoryConflict, MemoryEvent
@@ -54,6 +54,24 @@ class TrustService:
         target = await self._load_target(session, target_type, target.id)
         conflict_count = await self._open_conflict_count(session, target_type, target.id)
         return self.estimate_memory(target_type, target, open_conflict_count=conflict_count)
+
+    async def score_memories(
+        self, session: AsyncSession, target_type: TargetType, targets: list[MemoryTarget]
+    ) -> dict[uuid.UUID, TrustAssessment]:
+        """Bulk score already-loaded memories without N+1 target reloads/conflict queries."""
+        if not targets:
+            return {}
+        target_ids = [target.id for target in targets]
+        conflict_counts = await self._open_conflict_counts(session, target_type, target_ids)
+        return {
+            target.id: self.estimate_memory(
+                target_type,
+                target,
+                open_conflict_count=conflict_counts.get(target.id, 0),
+            )
+            for target in targets
+            if target.profile_id == self.profile_id
+        }
 
     @classmethod
     def estimate_memory(
@@ -146,21 +164,41 @@ class TrustService:
     async def _open_conflict_count(
         self, session: AsyncSession, target_type: TargetType, target_id: uuid.UUID
     ) -> int:
-        rows = (
+        return (await self._open_conflict_counts(session, target_type, [target_id])).get(target_id, 0)
+
+    async def _open_conflict_counts(
+        self, session: AsyncSession, target_type: TargetType, target_ids: list[uuid.UUID]
+    ) -> dict[uuid.UUID, int]:
+        if not target_ids:
+            return {}
+        left_rows = (
             await session.execute(
-                select(MemoryConflict.id).where(
+                select(MemoryConflict.left_id, func.count())
+                .where(
                     MemoryConflict.profile_id == self.profile_id,
                     MemoryConflict.status == CONFLICT_STATUS_OPEN,
-                    or_(
-                        (MemoryConflict.left_type == target_type)
-                        & (MemoryConflict.left_id == target_id),
-                        (MemoryConflict.right_type == target_type)
-                        & (MemoryConflict.right_id == target_id),
-                    ),
+                    MemoryConflict.left_type == target_type,
+                    MemoryConflict.left_id.in_(target_ids),
                 )
+                .group_by(MemoryConflict.left_id)
             )
-        ).scalars().all()
-        return len(rows)
+        ).all()
+        right_rows = (
+            await session.execute(
+                select(MemoryConflict.right_id, func.count())
+                .where(
+                    MemoryConflict.profile_id == self.profile_id,
+                    MemoryConflict.status == CONFLICT_STATUS_OPEN,
+                    MemoryConflict.right_type == target_type,
+                    MemoryConflict.right_id.in_(target_ids),
+                )
+                .group_by(MemoryConflict.right_id)
+            )
+        ).all()
+        counts: dict[uuid.UUID, int] = {}
+        for target_id, count in [*left_rows, *right_rows]:
+            counts[target_id] = counts.get(target_id, 0) + int(count)
+        return counts
 
     @staticmethod
     def _confidence(target: MemoryTarget) -> float:

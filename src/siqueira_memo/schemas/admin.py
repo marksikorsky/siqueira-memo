@@ -19,6 +19,9 @@ class AdminSearchRequest(MemoBase):
     project: str | None = None
     topic: str | None = None
     status: str | None = None
+    trust_filter: Literal[
+        "any", "high", "medium", "low", "very_low", "low_trust", "stale", "conflicting", "unverified"
+    ] = "any"
     since: datetime | None = None
     until: datetime | None = None
     limit: int = 50
@@ -32,6 +35,9 @@ class AdminSearchHit(MemoBase):
     project: str | None = None
     topic: str | None = None
     status: str | None = None
+    trust_score: float | None = None
+    trust_label: str | None = None
+    trust_explanation: str | None = None
     created_at: datetime
 
 

@@ -209,6 +209,9 @@ async def test_admin_ui_uses_form_login_instead_of_basic_auth_popup(api_client):
     assert "openEntityCard" in html
     assert "Relationship Graph" in html
     assert "relationship-badge" in html
+    assert "trust-filter" in html
+    assert "trust-badge" in html
+    assert "/v1/admin/trust/feedback" in html
     assert "--bg: #fbfaf8" in html
 
     logout = await client.post("/admin/logout", follow_redirects=False)
@@ -378,6 +381,79 @@ async def test_admin_search_supports_global_scope_and_capture_stats(api_client):
     assert capture_body["structured_facts"] >= 2
     assert capture_body["global_memories"] >= 1
     assert "recent_global_memories" in capture_body
+
+
+@pytest.mark.asyncio
+async def test_admin_search_returns_trust_badges_and_filters_low_trust(api_client):
+    client, settings = api_client
+    auth = _auth(settings)
+    ingest = await client.post(
+        "/v1/ingest/message",
+        headers=auth,
+        json={
+            "session_id": "trust-search",
+            "platform": "cli",
+            "role": "user",
+            "content": "Mark confirmed the trusted support contact.",
+        },
+    )
+    assert ingest.status_code == 200, ingest.text
+    trusted = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "fact",
+            "subject": "support contact trusted",
+            "predicate": "email",
+            "object": "trusted@example.com",
+            "statement": "The support contact email is trusted@example.com.",
+            "topic": "trust-search",
+            "source_event_ids": [ingest.json()["event_id"]],
+            "metadata": {"confirmed_by": "user"},
+        },
+    )
+    assert trusted.status_code == 200, trusted.text
+    weak = await client.post(
+        "/v1/memory/remember",
+        headers=auth,
+        json={
+            "kind": "fact",
+            "subject": "support contact weak",
+            "predicate": "email",
+            "object": "weak@example.com",
+            "statement": "The support contact email is weak@example.com.",
+            "topic": "trust-search",
+            "metadata": {"source_type": "summary", "inferred": True},
+            "confidence": 0.1,
+        },
+    )
+    assert weak.status_code == 200, weak.text
+
+    all_hits = await client.post(
+        "/v1/admin/search",
+        headers=auth,
+        json={"target_type": "fact", "query": "support contact email", "limit": 20},
+    )
+    assert all_hits.status_code == 200, all_hits.text
+    hits = all_hits.json()["hits"]
+    assert {hit["trust_label"] for hit in hits} >= {"high", "low"}
+    assert all("trust_score" in hit and "trust_explanation" in hit for hit in hits)
+
+    low = await client.post(
+        "/v1/admin/search",
+        headers=auth,
+        json={
+            "target_type": "fact",
+            "query": "support contact email",
+            "trust_filter": "low_trust",
+            "limit": 20,
+        },
+    )
+    assert low.status_code == 200, low.text
+    low_body = low.json()
+    assert low_body["total"] == 1
+    assert low_body["hits"][0]["id"] == weak.json()["id"]
+    assert low_body["hits"][0]["trust_label"] in {"low", "very_low"}
 
 
 @pytest.mark.asyncio
